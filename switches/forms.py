@@ -54,6 +54,12 @@ class ChangeForm(forms.Form):
     immediate = forms.BooleanField(required=False, label="Apply immediately after staging")
 
 
+class DeleteForm(forms.Form):
+    confirm = forms.BooleanField(
+        label="I understand this permanently removes this device, revisions, staged changes, job history, and access grants.",
+    )
+
+
 class BuilderForm(forms.Form):
     immediate = forms.BooleanField(required=False, label="Apply immediately after staging")
 

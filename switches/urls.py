@@ -8,6 +8,7 @@ urlpatterns = [
     path("discovery/", views.discovery, name="discovery"),
     path("switches/<int:pk>/", views.detail, name="switch-detail"),
     path("switches/<int:pk>/edit/", views.inventory, name="switch-edit"),
+    path("switches/<int:pk>/delete/", views.delete_inventory, name="switch-delete"),
     path("switches/<int:pk>/status/", views.status, name="switch-status"),
     path("switches/<int:pk>/action/", views.action, name="switch-action"),
     path("switches/<int:pk>/stage/", views.stage, name="switch-stage"),

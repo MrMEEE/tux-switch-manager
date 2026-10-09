@@ -11,7 +11,7 @@ from django.template.loader import render_to_string
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from . import services
-from .forms import BUILDERS, CONFIG_SECTION_CHOICES, ChangeForm, DiagnosticForm, DiscoveryForm, MonitorForm, SECTION_CHOICES, SwitchForm
+from .forms import BUILDERS, CONFIG_SECTION_CHOICES, ChangeForm, DeleteForm, DiagnosticForm, DiscoveryForm, MonitorForm, SECTION_CHOICES, SwitchForm
 from .models import ConfigChange, ConfigRevision, DiscoveryRun, Job, Switch, SwitchAccess
 from .permissions import can_access, visible_switches
 
@@ -80,12 +80,32 @@ def inventory(request, pk=None):
 
 
 @login_required
+@require_POST
+def delete_inventory(request, pk):
+    if not request.user.has_perm("switches.manage_inventory"):
+        raise PermissionDenied
+    with transaction.atomic():
+        switch = get_object_or_404(Switch.objects.select_for_update(), pk=pk)
+        if not can_access(request.user, switch, "admin"):
+            raise PermissionDenied
+        if not DeleteForm(request.POST).is_valid():
+            messages.error(request, "Confirm inventory deletion before proceeding.")
+            return redirect("switch-detail", pk=pk)
+        if switch.jobs.filter(status__in=("queued", "running")).exists():
+            messages.error(request, "This device has queued or running jobs. Wait for them to finish before deleting it.")
+            return redirect("switch-detail", pk=pk)
+        switch.delete()
+    messages.success(request, "Device inventory and associated history deleted.")
+    return redirect("dashboard")
+
+
+@login_required
 @require_GET
 def detail(request, pk):
     switch = device_for(request, pk)
     context = detail_context(request, switch)
     context.update(
-        change_form=ChangeForm(), monitor_form=MonitorForm(),
+        change_form=ChangeForm(), delete_form=DeleteForm(), monitor_form=MonitorForm(),
         diagnostic_form=DiagnosticForm(allow_show=context["operator"]),
         sections=SECTION_CHOICES + CONFIG_SECTION_CHOICES if context["operator"] else [(value, label) for value, label in SECTION_CHOICES if value in OPERATIONAL_SECTIONS],
         builders=[(section, form(prefix=section)) for section, form in BUILDERS.items()] if context["operator"] else [],

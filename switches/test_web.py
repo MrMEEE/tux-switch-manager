@@ -395,6 +395,51 @@ class WebTests(TestCase):
         self.assertEqual(self.client.post(self.url("switch-edit"), {}).status_code, 403)
         self.assertNotContains(self.client.get(self.url("switch-detail")), "Edit inventory")
 
+    def test_inventory_delete_requires_admin_and_global_inventory_permission(self):
+        for user in [self.viewer, self.operator]:
+            user.user_permissions.add(Permission.objects.get(codename="manage_inventory"))
+            self.client.force_login(user)
+            self.assertEqual(self.client.post(self.url("switch-delete"), {"confirm": "on"}).status_code, 403)
+            self.assertNotContains(self.client.get(self.url("switch-detail")), "Delete device permanently")
+        self.client.force_login(self.admin)
+        self.assertEqual(self.client.post(self.url("switch-delete"), {"confirm": "on"}).status_code, 403)
+        self.assertTrue(Switch.objects.filter(pk=self.switch.pk).exists())
+
+    def test_inventory_delete_requires_explicit_confirmation(self):
+        self.admin.user_permissions.add(Permission.objects.get(codename="manage_inventory"))
+        self.client.force_login(self.admin)
+        response = self.client.post(self.url("switch-delete"), {}, follow=True)
+        self.assertContains(response, "Confirm inventory deletion")
+        self.assertTrue(Switch.objects.filter(pk=self.switch.pk).exists())
+
+    def test_inventory_delete_refuses_queued_and_running_jobs(self):
+        self.admin.user_permissions.add(Permission.objects.get(codename="manage_inventory"))
+        self.client.force_login(self.admin)
+        for status in ["queued", "running"]:
+            self.job.status = status
+            self.job.save()
+            response = self.client.post(self.url("switch-delete"), {"confirm": "on"}, follow=True)
+            self.assertContains(response, "queued or running jobs")
+            self.assertTrue(Switch.objects.filter(pk=self.switch.pk).exists())
+
+    def test_inventory_delete_is_post_csrf_protected_and_cascades_history(self):
+        self.admin.user_permissions.add(Permission.objects.get(codename="manage_inventory"))
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.admin)
+        self.assertEqual(client.get(self.url("switch-delete")).status_code, 405)
+        self.assertEqual(client.post(self.url("switch-delete"), {"confirm": "on"}).status_code, 403)
+        self.assertTrue(Switch.objects.filter(pk=self.switch.pk).exists())
+        self.switch.jobs.update(status="succeeded")
+        client.get(self.url("switch-detail"))
+        response = client.post(self.url("switch-delete"), {"confirm": "on", "csrfmiddlewaretoken": client.cookies["csrftoken"].value})
+        self.assertRedirects(response, reverse("dashboard"))
+        self.assertFalse(Switch.objects.filter(pk=self.switch.pk).exists())
+        self.assertFalse(ConfigRevision.objects.filter(pk=self.revision.pk).exists())
+        self.assertFalse(ConfigChange.objects.filter(pk=self.change.pk).exists())
+        self.assertFalse(Job.objects.filter(pk=self.job.pk).exists())
+        self.assertFalse(SwitchAccess.objects.filter(switch_id=self.switch.pk).exists())
+        self.assertTrue(Switch.objects.filter(pk=self.other.pk).exists())
+
     @patch("switches.views.services.queue_restore")
     def test_operator_restores_owned_revision(self, queue):
         self.client.force_login(self.operator)
