@@ -8,6 +8,7 @@ from django.db import transaction
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
+from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from . import services
@@ -51,7 +52,7 @@ def detail_context(request, switch):
         "snapshot_text": json.dumps(snapshot, indent=2, ensure_ascii=False),
         "jobs": list(jobs[:30]) if operator else [job for job in jobs[:100] if viewer_job(job)][:30],
         "revisions": switch.revisions.all()[:30] if operator else [],
-        "changes": switch.changes.exclude(status__in=["discarded", "applied"])[:20] if operator else [],
+        "changes": switch.changes.exclude(status__in=["discarded", "committed"])[:20] if operator else [],
     }
 
 
@@ -101,6 +102,7 @@ def delete_inventory(request, pk):
 
 @login_required
 @require_GET
+@never_cache
 def detail(request, pk):
     switch = device_for(request, pk)
     context = detail_context(request, switch)
@@ -115,6 +117,7 @@ def detail(request, pk):
 
 @login_required
 @require_GET
+@never_cache
 def status(request, pk):
     switch = device_for(request, pk)
     html = render_to_string("switches/live.html", detail_context(request, switch), request=request)
@@ -160,6 +163,7 @@ def action(request, pk):
 
 @login_required
 @require_POST
+@never_cache
 def stage(request, pk):
     switch = device_for(request, pk, "operator")
     section = request.POST.get("builder_section")
@@ -204,6 +208,7 @@ def change_action(request, pk, change_id):
 
 @login_required
 @require_GET
+@never_cache
 def revision(request, pk, revision_id):
     switch = device_for(request, pk, "operator")
     revision = get_object_or_404(ConfigRevision, switch=switch, pk=revision_id)
@@ -232,6 +237,7 @@ def restore(request, pk, revision_id):
 
 @login_required
 @require_GET
+@never_cache
 def job(request, pk, job_id):
     switch = device_for(request, pk)
     job = get_object_or_404(Job, switch=switch, pk=job_id)

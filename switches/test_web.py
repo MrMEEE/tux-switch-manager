@@ -61,7 +61,20 @@ class WebTests(TestCase):
             self.assertNotIn("sensitive-config", body)
             self.assertNotIn("sensitive-output", body)
             self.assertNotIn("<script>alert", body)
-        self.assertEqual(self.client.get(self.url("switch-status"))["Cache-Control"], "no-store")
+        self.assertIn("no-store", self.client.get(self.url("switch-status"))["Cache-Control"])
+
+    def test_sensitive_device_responses_are_not_cached(self):
+        self.client.force_login(self.operator)
+        paths = [
+            self.url("switch-detail"), self.url("switch-status"),
+            self.url("revision-detail", self.switch.pk, self.revision.pk),
+            self.url("job-detail", self.switch.pk, self.job.pk),
+        ]
+        for path in paths:
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 200)
+            for directive in ["no-store", "no-cache", "private"]:
+                self.assertIn(directive, response["Cache-Control"])
 
     def test_outsider_cannot_access_device(self):
         self.client.force_login(self.outsider)
@@ -285,6 +298,18 @@ class WebTests(TestCase):
         self.client.post(reverse("change-action", args=[self.switch.pk, self.change.pk]), {"action": "discard"})
         self.change.refresh_from_db()
         self.assertEqual(self.change.status, "discarded")
+
+    def test_pending_changes_exclude_committed_and_discarded_statuses(self):
+        self.client.force_login(self.operator)
+        for status in ["committed", "discarded"]:
+            ConfigChange.objects.create(
+                switch=self.switch, base_revision=self.revision, status=status,
+                commands=f"set system host-name hidden-{status}",
+            )
+        response = self.client.get(self.url("switch-detail"))
+        self.assertContains(response, self.change.commands)
+        self.assertNotContains(response, "hidden-committed")
+        self.assertNotContains(response, "hidden-discarded")
 
     def test_scope_foreign_keys_to_switch(self):
         self.client.force_login(self.operator)
