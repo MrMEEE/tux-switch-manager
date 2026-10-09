@@ -1,0 +1,9 @@
+{% load static %}<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{% block title %}Tux Switch Manager{% endblock %}</title><link rel="stylesheet" href="{% static 'switches/app.css' %}"><script defer src="{% static 'switches/app.js' %}"></script></head>
+<body>
+<header><a class="brand" href="{% url 'dashboard' %}"><span class="brand-icon">⇄</span> TUX <span>Switch Manager</span></a>
+{% if user.is_authenticated %}<nav><a href="{% url 'dashboard' %}">Fleet</a>{% if perms.switches.discover_switches %}<a href="{% url 'discovery' %}">Discovery</a>{% endif %}{% if user.is_staff %}<a href="{% url 'admin:index' %}">Administration</a>{% endif %}<span class="user">{{ user.username }}</span><form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="quiet">Sign out</button></form></nav>{% endif %}</header>
+<main>{% for message in messages %}<div class="notice {{ message.tags }}" role="status">{{ message }}</div>{% endfor %}{% block content %}{% endblock %}</main>
+<footer>Tux Switch Manager · Secure operations, deliberate changes</footer>
+</body></html>
