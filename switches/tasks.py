@@ -137,9 +137,10 @@ def poll_switches():
             ).update(status="pending")
         notify_switch(expired.switch_id)
     for switch in Switch.objects.filter(active=True).defer("snapshot"):
-        if switch.jobs.filter(status__in=["queued", "running"]).exists():
-            continue
         with transaction.atomic():
+            switch = Switch.objects.select_for_update().defer("snapshot").filter(pk=switch.pk, active=True).first()
+            if switch is None or switch.jobs.filter(status__in=["queued", "running"]).exists():
+                continue
             job = Job.objects.create(switch=switch, action="sync")
             transaction.on_commit(lambda job_id=job.pk: publish_job(job_id))
 

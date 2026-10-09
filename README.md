@@ -1,7 +1,7 @@
 # Tux Switch Manager
 
 A multi-switch management application built with Python, Django, Celery/Beat and
-Django Channels. Switchman is the functional reference; there is intentionally
+Django Channels. [Switchman](https://github.com/MrMEEE/switchman) is the functional reference; there is intentionally
 no switch image, faceplate mapping or image-detection integration. The initial
 driver targets Juniper EX3300-24P and EX3300-48P, including older non-ELS Junos.
 

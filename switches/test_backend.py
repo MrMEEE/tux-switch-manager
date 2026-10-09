@@ -119,6 +119,14 @@ class BackendTests(TestCase):
                 job = queue_job(self.switch, "sync", {}, self.viewer)
             publish.assert_called_once_with(job.pk)
 
+    def test_queuing_checks_fresh_device_state(self):
+        Switch.objects.filter(pk=self.switch.pk).update(active=False)
+        with self.assertRaises(ValueError):
+            queue_job(self.switch, "sync", {}, self.viewer)
+        Switch.objects.filter(pk=self.switch.pk).delete()
+        with self.assertRaises(ValueError):
+            queue_job(self.switch, "sync", {}, self.viewer)
+
     def test_change_cannot_be_queued_twice_or_discarded_in_flight(self):
         change = stage_change(self.switch, "set system host-name test", self.user)
         with patch("switches.services.publish_job"):

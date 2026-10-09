@@ -572,22 +572,30 @@ class BuilderTests(unittest.TestCase):
             }), [f"{verb} system ntp server time.example.net"])
 
     def test_snmp_add_delete_uses_environment_reference(self):
-        with patch.dict(os.environ, {"SNMP_TEST_REFERENCE": "test-readonly"}):
+        with patch.dict(os.environ, {"SWITCH_CREDENTIAL_SNMP_TEST": "test-readonly"}):
             self.assertEqual(validation.build_change("snmp", {
-                "community_env": "SNMP_TEST_REFERENCE", "clients": ["192.0.2.0/24"],
+                "community_env": "SWITCH_CREDENTIAL_SNMP_TEST", "clients": ["192.0.2.0/24"],
             }), ["set snmp community test-readonly authorization read-only",
                  "delete snmp community test-readonly clients",
                  "set snmp community test-readonly clients 192.0.2.0/24"])
             self.assertEqual(validation.build_change("snmp", {
-                "community_env": "SNMP_TEST_REFERENCE", "operation": "delete",
+                "community_env": "SWITCH_CREDENTIAL_SNMP_TEST", "operation": "delete",
             }), ["delete snmp community test-readonly"])
 
     def test_snmp_missing_or_unsafe_secret_never_echoed(self):
         for value in ("", "secret;commit", "secret\ncommit"):
-            with patch.dict(os.environ, {"SNMP_TEST_REFERENCE": value}):
+            with patch.dict(os.environ, {"SWITCH_CREDENTIAL_SNMP_TEST": value}):
                 with self.assertRaises(DriverError) as error:
-                    validation.build_change("snmp", {"community_env": "SNMP_TEST_REFERENCE"})
+                    validation.build_change("snmp", {"community_env": "SWITCH_CREDENTIAL_SNMP_TEST"})
                 self.assertNotIn("secret", str(error.exception))
+
+    def test_snmp_unrelated_environment_secrets_never_read(self):
+        for reference in ("DJANGO_SECRET_KEY", "PATH", "SWITCH_CREDENTIAL_",
+                          "SWITCH_CREDENTIAL_lowercase", "SWITCH_CREDENTIAL_TEST\n"):
+            with self.subTest(reference=reference), patch.object(os.environ, "get") as get:
+                with self.assertRaisesRegex(DriverError, "SNMP credential environment reference"):
+                    validation.build_change("snmp", {"community_env": reference})
+                get.assert_not_called()
 
     def test_invalid_operations_and_operation_fields(self):
         cases = [

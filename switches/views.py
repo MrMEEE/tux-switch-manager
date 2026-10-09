@@ -16,20 +16,18 @@ from .models import ConfigChange, ConfigRevision, DiscoveryRun, Job, Switch, Swi
 from .permissions import can_access, visible_switches
 
 
-READ_ACTIONS = {"sync", "monitor", "ping", "traceroute"}
-OPERATIONAL_SECTIONS = {
-    "system", "uptime", "chassis", "chassis_env", "chassis_fpc", "health",
-    "interfaces", "interfaces_detail", "switching", "vlans", "routing",
-    "bgp", "ospf", "arp", "mac", "lldp", "poe", "alarms", "chassis_alarms",
-    "stp", "igmp", "dot1x", "port_security", "system_processes",
-}
-VIEWER_SNAPSHOT_KEYS = OPERATIONAL_SECTIONS | {"facts", "snmp_interfaces"}
+READ_ACTIONS = {action for action, role in services.ACTION_ROLES.items() if role == "viewer"}
+OPERATIONAL_SECTIONS = services.PUBLIC_MONITOR_SECTIONS
+VIEWER_SNAPSHOT_KEYS = OPERATIONAL_SECTIONS | {"facts", "snmp_interfaces", "snmp_error"}
 
 
 def viewer_job(job):
-    if job.action not in READ_ACTIONS:
+    if not isinstance(job.payload, dict):
         return False
-    return job.action != "monitor" or job.payload.get("section") in OPERATIONAL_SECTIONS
+    try:
+        return services.action_role(job.action, job.payload) == "viewer"
+    except KeyError:
+        return False
 
 
 def device_for(request, pk, role="viewer"):
@@ -109,11 +107,11 @@ def status(request, pk):
 @require_POST
 def action(request, pk):
     action = request.POST.get("action", "")
-    role = "viewer"
-    if action == "reboot":
-        role = "admin"
-    elif action in {"show", "command"} or (action == "monitor" and request.POST.get("section") not in OPERATIONAL_SECTIONS):
-        role = "operator"
+    if action not in {"sync", "monitor", "show", "ping", "traceroute", "reboot"}:
+        raise PermissionDenied
+    role = services.action_role(
+        "command" if action == "show" else action, {"section": request.POST.get("section")}
+    )
     switch = device_for(request, pk, role)
     payload = {}
     if action == "monitor":

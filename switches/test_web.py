@@ -1,3 +1,4 @@
+import os
 from unittest.mock import patch
 
 from asgiref.sync import async_to_sync
@@ -102,9 +103,10 @@ class WebTests(TestCase):
         }
         self.switch.save()
         secret_jobs = [
-            Job.objects.create(switch=self.switch, action="command", output="private-command-output"),
-            Job.objects.create(switch=self.switch, action="monitor", payload={"section": "services"}, output="private-services-output"),
-            Job.objects.create(switch=self.switch, action="monitor", payload={"section": "system_config"}, output="private-config-output"),
+            Job.objects.create(switch=self.switch, action="command", output="private-command-output", created_by=self.operator),
+            Job.objects.create(switch=self.switch, action="monitor", payload={"section": "services"}, output="private-services-output", created_by=self.operator),
+            Job.objects.create(switch=self.switch, action="monitor", payload={"section": "security"}, output="private-security-output", created_by=self.operator),
+            Job.objects.create(switch=self.switch, action="monitor", payload={"section": "system_config"}, output="private-config-output", created_by=self.operator),
         ]
         for name in ["switch-detail", "switch-status"]:
             response = self.client.get(self.url(name))
@@ -180,40 +182,79 @@ class WebTests(TestCase):
         self.client.force_login(self.operator)
         cases = [
             ("system", {"hostname": "edge"}, "set system host-name edge"),
-            ("domain", {"domain": "example.net", "operation": "set"}, "set system domain-name example.net"),
+            ("system", {"domain_name": "example.net"}, "set system domain-name example.net"),
+            ("system", {"time_zone": "UTC"}, "set system time-zone UTC"),
+            ("domain", {"domain": "example.net"}, "set system domain-name example.net"),
             ("vlans", {"name": "users", "vlan_id": 10}, "set vlans users vlan-id 10"),
             ("vlan_actions", {"name": "users", "operation": "delete"}, "delete vlans users"),
             ("vlan_actions", {"name": "users", "operation": "remove_member", "interface": "ge-0/0/1"}, "delete interfaces ge-0/0/1 unit 0 family ethernet-switching vlan members users"),
             ("interfaces", {"name": "ge-0/0/1", "admin_state": "down"}, "set interfaces ge-0/0/1 disable"),
+            ("interfaces", {"name": "ge-0/0/1", "operation": "disable"}, "set interfaces ge-0/0/1 disable"),
+            ("interfaces", {"name": "ge-0/0/1", "operation": "enable"}, "delete interfaces ge-0/0/1 disable"),
             ("interfaces", {"name": "ge-0/0/1", "mode": "access", "vlans": "users"}, "set interfaces ge-0/0/1 unit 0 family ethernet-switching port-mode access"),
             ("lag", {"operation": "configure", "name": "ae0", "members": "ge-0/0/1,ge-0/0/2"}, "set interfaces ge-0/0/2 ether-options 802.3ad ae0"),
             ("lag", {"operation": "delete", "name": "ae0", "members": "ge-0/0/1"}, "delete interfaces ge-0/0/1 ether-options 802.3ad"),
             ("lag", {"operation": "device_count", "device_count": 4}, "set chassis aggregated-devices ethernet device-count 4"),
-            ("static_route", {"operation": "set", "prefix": "198.51.100.0/24", "next_hop": "192.0.2.254"}, "set routing-options static route 198.51.100.0/24 next-hop 192.0.2.254"),
+            ("static_route", {"operation": "create", "prefix": "198.51.100.0/24", "next_hop": "192.0.2.254"}, "set routing-options static route 198.51.100.0/24 next-hop 192.0.2.254"),
             ("static_route", {"operation": "delete", "prefix": "198.51.100.0/24"}, "delete routing-options static route 198.51.100.0/24"),
-            ("ntp", {"operation": "set", "server": "192.0.2.10"}, "set system ntp server 192.0.2.10"),
+            ("ntp", {"operation": "add", "server": "192.0.2.10"}, "set system ntp server 192.0.2.10"),
             ("ntp", {"operation": "delete", "server": "192.0.2.10"}, "delete system ntp server 192.0.2.10"),
-            ("snmp_community", {"operation": "set", "community": "test-readonly"}, "set snmp community test-readonly authorization read-only"),
-            ("snmp_community", {"operation": "delete", "community": "test-readonly"}, "delete snmp community test-readonly"),
+            ("ntp", {"operation": "add", "server": "ntp.example.net"}, "set system ntp server ntp.example.net"),
+            ("snmp_community", {"operation": "add", "community_env": "SWITCH_CREDENTIAL_TEST_SNMP"}, "set snmp community test-readonly authorization read-only"),
+            ("snmp_community", {"operation": "delete", "community_env": "SWITCH_CREDENTIAL_TEST_SNMP"}, "delete snmp community test-readonly"),
         ]
-        with patch("switches.drivers.registry.get_driver") as factory:
+        with patch("switches.drivers.registry.get_driver") as factory, patch.dict(os.environ, {"SWITCH_CREDENTIAL_TEST_SNMP": "test-readonly"}):
             factory.return_value.build_change.side_effect = build_change
             for section, values, command in cases:
                 with self.subTest(section=section, values=values):
                     data = {"builder_section": section, **{f"{section}-{key}": value for key, value in values.items()}}
                     self.assertEqual(self.client.post(self.url("switch-stage"), data).status_code, 302)
                     self.assertIn(command, ConfigChange.objects.first().commands.splitlines())
+                    self.assertNotEqual(factory.return_value.build_change.call_args.args[0], "manual")
+
+    def test_lag_count_only_changes_with_explicit_user_input(self):
+        from .drivers.validation import build_change
+        self.client.force_login(self.operator)
+        data = {"builder_section": "lag", "lag-operation": "configure", "lag-name": "ae4", "lag-members": "ge-0/0/1"}
+        with patch("switches.drivers.registry.get_driver") as factory:
+            factory.return_value.build_change.side_effect = build_change
+            self.assertEqual(self.client.post(self.url("switch-stage"), data).status_code, 302)
+            self.assertNotIn("device_count", factory.return_value.build_change.call_args.args[1])
+            self.assertNotIn("device-count", ConfigChange.objects.first().commands)
+            data["lag-device_count"] = 8
+            self.assertEqual(self.client.post(self.url("switch-stage"), data).status_code, 302)
+            self.assertEqual(factory.return_value.build_change.call_args.args[1]["device_count"], 8)
+            self.assertIn("device-count 8", ConfigChange.objects.first().commands)
+
+    def test_structured_snmp_resolves_reference_and_encrypts_staged_community(self):
+        from django.db import connection
+        from .drivers.validation import build_change
+        self.client.force_login(self.operator)
+        data = {"builder_section": "snmp_community", "snmp_community-operation": "add", "snmp_community-community_env": "SWITCH_CREDENTIAL_TEST_SNMP", "snmp_community-clients": "192.0.2.0/24"}
+        with patch("switches.drivers.registry.get_driver") as factory, patch.dict(os.environ, {"SWITCH_CREDENTIAL_TEST_SNMP": "test-readonly"}):
+            factory.return_value.build_change.side_effect = build_change
+            self.assertEqual(self.client.post(self.url("switch-stage"), data).status_code, 302)
+            self.assertEqual(factory.return_value.build_change.call_args.args[0], "snmp")
+            values = factory.return_value.build_change.call_args.args[1]
+            self.assertEqual(values["community_env"], "SWITCH_CREDENTIAL_TEST_SNMP")
+            self.assertNotIn("community", values)
+            change = ConfigChange.objects.first()
+            self.assertIn("set snmp community test-readonly authorization read-only", change.commands)
+            self.assertIn("clients 192.0.2.0/24", change.commands)
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT commands FROM switches_configchange WHERE id = %s", [change.pk])
+                self.assertNotIn("test-readonly", cursor.fetchone()[0])
 
     def test_common_structured_actions_reject_injection_and_missing_fields(self):
         self.client.force_login(self.operator)
         cases = [
-            ("domain", {"domain": "example.net;reboot", "operation": "set"}),
+            ("domain", {"domain": "example.net;reboot"}),
             ("vlan_actions", {"name": "users", "operation": "remove_member"}),
             ("lag", {"operation": "configure", "name": "ae0", "members": "ge-0/0/1;reboot"}),
             ("lag", {"operation": "device_count"}),
-            ("static_route", {"operation": "set", "prefix": "198.51.100.0/24", "next_hop": "2001:db8::1"}),
-            ("ntp", {"operation": "set", "server": "192.0.2.1;reboot"}),
-            ("snmp_community", {"operation": "set", "community": "unsafe|value"}),
+            ("static_route", {"operation": "create", "prefix": "198.51.100.0/24", "next_hop": "2001:db8::1"}),
+            ("ntp", {"operation": "add", "server": "192.0.2.1;reboot"}),
+            ("snmp_community", {"operation": "add", "community_env": "unsafe|value"}),
         ]
         with patch("switches.drivers.registry.get_driver") as factory:
             for section, values in cases:

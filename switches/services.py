@@ -66,11 +66,14 @@ def publish_job(job_id):
 def queue_job(switch, action, payload, user):
     if action not in ACTION_ROLES:
         raise ValueError("Unsupported operation.")
-    if not can_access(user, switch, action_role(action, payload)):
-        raise ValueError("You do not have permission for this operation.")
-    if not switch.active:
-        raise ValueError("This switch is inactive.")
     with transaction.atomic():
+        switch = Switch.objects.select_for_update().defer("snapshot").filter(pk=switch.pk).first()
+        if switch is None:
+            raise ValueError("This switch no longer exists.")
+        if not can_access(user, switch, action_role(action, payload)):
+            raise ValueError("You do not have permission for this operation.")
+        if not switch.active:
+            raise ValueError("This switch is inactive.")
         job = Job.objects.create(switch=switch, action=action, payload=payload, created_by=user)
         transaction.on_commit(lambda: publish_job(job.pk))
         transaction.on_commit(lambda: notify_switch(switch.pk))

@@ -162,7 +162,7 @@ def build_change(section, values):
     authorization?: read-only|read-write, clients?: [IPv4 CIDR]}.
     LAG configure/delete requires explicit member names; count-only needs only
     device_count. Defaults are configure/create/add. SNMP communities are read
-    from an environment reference, never embedded in forms; generated commands
+    from a SWITCH_CREDENTIAL_[A-Z0-9_]+ environment reference, never embedded in forms; generated commands
     still contain the community and must be handled as sensitive configuration.
     VLAN membership replaces existing members. LAG attachment clears ethernet
     switching units; configuring the ae interface remains a separate change.
@@ -359,7 +359,7 @@ def build_change(section, values):
             commands = [f"{verb} system ntp server {server}"]
         elif section == "snmp":
             reference = values["community_env"]
-            if not isinstance(reference, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", reference):
+            if not isinstance(reference, str) or not re.fullmatch(r"SWITCH_CREDENTIAL_[A-Z0-9_]+", reference):
                 raise DriverError("Invalid SNMP credential environment reference.")
             community = os.environ.get(reference)
             if not community:
