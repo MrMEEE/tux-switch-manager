@@ -1,6 +1,7 @@
 """Original NETCONF 1.0 Junos implementation, including older non-ELS EX3300s."""
 
 import math
+import re
 import socket
 import time
 import xml.etree.ElementTree as ET
@@ -99,7 +100,7 @@ class JuniperEXDriver(BaseDriver):
         "vlans_config": ("vlans",),
         "routing_config": ("routing-options", "protocols"),
     }
-    monitor_sections = frozenset(MONITOR_COMMANDS)
+    monitor_sections = frozenset(MONITOR_COMMANDS) | frozenset(CONFIG_SECTIONS)
 
     def __init__(self, host, port=22, username="", password="", known_hosts=None, timeout=15):
         self.host = validation.address(host)
@@ -238,14 +239,39 @@ class JuniperEXDriver(BaseDriver):
                 return "".join(node.itertext())
         if _find(reply, "ok") is not None:
             return "OK"
-        return "\n".join(ET.tostring(child, encoding="unicode") for child in reply)
+        return "\n".join(
+            ET.tostring(child, encoding="unicode") for child in reply
+            if _local(child.tag) != "rpc-error"
+        )
 
     def get_facts(self):
+        """Identify an EX3300-24P/48P and return hostname/model/serial/version.
+
+        Other detected models are rejected rather than implying compatibility
+        with the non-ELS configuration builders.
+        """
         reply = self._rpc(_element("get-software-information"))
+        model = (_text(reply, "product-model") or _text(reply, "product-name")).strip()
+        if model.lower() not in {"ex3300-24p", "ex3300-48p"}:
+            raise DriverError("This driver requires an EX3300-24P or EX3300-48P.")
+        version = _text(reply, "junos-version") or _text(reply, "version")
+        if not version:
+            # Older EX3300 images report versions only in package comments.
+            for node in reply.iter():
+                if _local(node.tag) == "package-information":
+                    comment = _text(node, "comment")
+                    match = re.search(r"\[([A-Za-z0-9_.-]+)\]", comment)
+                    if comment.startswith("JUNOS") and match:
+                        version = match.group(1)
+                        break
+        inventory = self._rpc(_element("get-chassis-inventory"))
+        chassis = _find(inventory, "chassis")
+        serial = _text(chassis, "serial-number") if chassis is not None else ""
         return {
             "hostname": _text(reply, "host-name"),
-            "model": _text(reply, "product-model") or _text(reply, "product-name"),
-            "version": _text(reply, "junos-version") or _text(reply, "version"),
+            "model": model,
+            "serial": serial,
+            "version": version,
             "vendor": "Juniper",
             "raw": self._output(reply),
         }
@@ -262,13 +288,30 @@ class JuniperEXDriver(BaseDriver):
         return self._output(self._rpc(_element("command", validated, format="text")))
 
     def monitor(self, section):
-        if not isinstance(section, str) or section not in self.MONITOR_COMMANDS:
+        """Read an allowlisted operational or configuration section.
+
+        Configuration sections can include sensitive configuration. Applications
+        must authorize those separately from operational monitoring.
+        """
+        if not isinstance(section, str) or section not in self.monitor_sections:
             raise DriverError("Unknown monitoring section.")
+        if section in self.CONFIG_SECTIONS:
+            return self._config_section(section)
         return self.run_command(self.MONITOR_COMMANDS[section])
+
+    def _config_section(self, section):
+        operation = _element("get-configuration", database="committed", format="text")
+        config = ET.SubElement(operation, "configuration")
+        for path in self.CONFIG_SECTIONS[section]:
+            node = config
+            for part in path.split("/"):
+                child = next((item for item in node if item.tag == part), None)
+                node = ET.SubElement(node, part) if child is None else child
+        return self._output(self._rpc(operation))
 
     def snapshot(self):
         result = {"facts": self.get_facts(), "config": self.get_config(), "errors": {}}
-        for section in self.MONITOR_COMMANDS:
+        for section in (*self.MONITOR_COMMANDS, *self.CONFIG_SECTIONS):
             try:
                 result[section] = self.monitor(section)
             except DriverError:
@@ -276,21 +319,6 @@ class JuniperEXDriver(BaseDriver):
                     raise
                 result[section] = ""
                 result["errors"][section] = "Monitoring section unavailable."
-        for section, paths in self.CONFIG_SECTIONS.items():
-            operation = _element("get-configuration", database="committed", format="text")
-            config = ET.SubElement(operation, "configuration")
-            for path in paths:
-                node = config
-                for part in path.split("/"):
-                    child = next((item for item in node if item.tag == part), None)
-                    node = ET.SubElement(node, part) if child is None else child
-            try:
-                result[section] = self._output(self._rpc(operation))
-            except DriverError:
-                if self._channel is None:
-                    raise
-                result[section] = ""
-                result["errors"][section] = "Configuration section unavailable."
         return result
 
     def diagnostic(self, action, target=""):
@@ -326,7 +354,7 @@ class JuniperEXDriver(BaseDriver):
         return "".join(node.itertext())
 
     def _discard(self):
-        self._rpc(_element("load-configuration", rollback="0"))
+        self._rpc(_element("load-configuration", compare="rollback", rollback="0"))
 
     def _transaction(self, operation, expected_config=None, commit=False):
         if commit and not isinstance(expected_config, str):

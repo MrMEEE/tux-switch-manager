@@ -18,7 +18,8 @@ def get_driver(device):
     SWITCH_DRIVERS maps device.driver slugs to dotted BaseDriver subclass paths;
     when absent, juniper_ex is available. SWITCH_KNOWN_HOSTS is an optional path
     loaded in addition to system SSH known_hosts. SWITCH_TIMEOUT defaults to 15.
-    The password comes only from the environment variable device.credential_env.
+    The password comes only from device.credential_env, which must match
+    SWITCH_CREDENTIAL_[A-Z0-9_]+; unrelated process secrets are never consulted.
     """
     from django.conf import settings
 
@@ -40,7 +41,7 @@ def _get_driver(device, settings):
         if not isinstance(driver_class, type) or not issubclass(driver_class, BaseDriver):
             raise DriverError("Registered driver must implement BaseDriver.")
         credential_env = device.credential_env
-        if not isinstance(credential_env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", credential_env):
+        if not isinstance(credential_env, str) or not re.fullmatch(r"SWITCH_CREDENTIAL_[A-Z0-9_]+", credential_env):
             raise DriverError("Invalid credential environment reference.")
         password = os.environ.get(credential_env)
         if not password:

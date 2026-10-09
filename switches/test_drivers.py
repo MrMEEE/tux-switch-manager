@@ -96,6 +96,10 @@ class FakeChannel:
             ET.SubElement(info, "host-name").text = "edge"
             ET.SubElement(info, "product-model").text = "ex3300-48p"
             ET.SubElement(info, "junos-version").text = "12.3R12"
+        elif label == "get-chassis-inventory":
+            inventory = ET.SubElement(reply, "chassis-inventory")
+            chassis = ET.SubElement(inventory, "chassis")
+            ET.SubElement(chassis, "serial-number").text = "EXTEST1234"
         elif label in {"command", "ping", "traceroute", "request-reboot"}:
             ET.SubElement(reply, "output").text = "operational output"
         else:
@@ -165,7 +169,27 @@ class DriverTests(unittest.TestCase):
         facts = self.driver.get_facts()
         self.assertEqual(facts["model"], "ex3300-48p")
         self.assertEqual(facts["version"], "12.3R12")
+        self.assertEqual(facts["serial"], "EXTEST1234")
         self.assertEqual(self.driver.get_config(), self.channel.committed_config)
+
+    def test_old_junos_package_version(self):
+        reply = ET.fromstring(
+            "<rpc-reply><software-information><product-model>ex3300-24p</product-model>"
+            "<package-information><name>junos</name>"
+            "<comment>JUNOS Base OS boot [12.3R12.4]</comment>"
+            "</package-information></software-information></rpc-reply>"
+        )
+        with patch.object(self.driver, "_rpc", return_value=reply):
+            self.assertEqual(self.driver.get_facts()["version"], "12.3R12.4")
+
+    def test_unsupported_model_rejected(self):
+        for model in ("ex4300-48p", "ex3300-24t", "", "sensitive-device-detail"):
+            reply = ET.Element("rpc-reply")
+            ET.SubElement(reply, "product-model").text = model
+            with self.subTest(model=model), patch.object(self.driver, "_rpc", return_value=reply):
+                with self.assertRaisesRegex(DriverError, "requires an EX3300") as error:
+                    self.driver.get_facts()
+                self.assertNotIn("sensitive-device-detail", str(error.exception))
 
     def test_show_command_is_xml_not_shell(self):
         self.assertEqual(self.driver.run_command("show interfaces ge-0/0/47 detail"), "operational output")
@@ -192,6 +216,26 @@ class DriverTests(unittest.TestCase):
             self.assertEqual(self.driver.monitor(section), "operational output")
         with self.assertRaises(DriverError):
             self.driver.monitor("show version")
+
+    def test_configuration_monitor_sections_use_scoped_rpc(self):
+        for section in self.driver.CONFIG_SECTIONS:
+            with self.subTest(section=section):
+                self.assertIn(section, self.driver.monitor_sections)
+                self.driver.monitor(section)
+                operation = self.channel.operations[-1]
+                self.assertEqual(operation.tag, "get-configuration")
+                self.assertEqual(operation.attrib, {"database": "committed", "format": "text"})
+                config = operation.find("configuration")
+                self.assertIsNotNone(config)
+                for path in self.driver.CONFIG_SECTIONS[section]:
+                    self.assertIsNotNone(config.find(path))
+        self.assertNotIn("command", self.channel.calls)
+
+    def test_configuration_monitor_failure_is_safe(self):
+        self.channel.fail.add("get-config")
+        with self.assertRaises(DriverError) as error:
+            self.driver.monitor("security")
+        self.assertNotIn("sensitive-device-detail", str(error.exception))
 
     def test_snapshot_contains_required_and_all_monitor_sections(self):
         result = self.driver.snapshot()
@@ -236,6 +280,8 @@ class DriverTests(unittest.TestCase):
         ])
         self.assertNotIn("commit", self.channel.calls)
         self.assertEqual(self.channel.pending, "")
+        discard = next(op for op in self.channel.operations if "rollback" in op.attrib and op.tag == "load-configuration")
+        self.assertEqual(discard.attrib, {"compare": "rollback", "rollback": "0"})
 
     def test_apply_compares_and_commits_under_lock(self):
         expected = self.channel.committed_config
@@ -372,6 +418,43 @@ class DriverTests(unittest.TestCase):
         with self.assertRaisesRegex(DriverError, "not connected"):
             self.driver.get_config()
 
+    def test_unsupported_netconf_capability_fails_handshake(self):
+        self.driver.close()
+        self.channel.wire = (
+            f'<hello xmlns="{NETCONF}"><capabilities><capability>'
+            "urn:ietf:params:netconf:base:1.1"
+            "</capability></capabilities></hello>"
+        ).encode() + DELIMITER
+        with self.assertRaisesRegex(DriverError, "NETCONF 1.0"):
+            self.driver.__enter__()
+        self.assertTrue(self.channel.closed)
+
+    def test_missing_config_and_diff_are_not_silently_accepted(self):
+        with patch.object(self.driver, "_rpc", return_value=ET.Element("rpc-reply")):
+            with self.assertRaisesRegex(DriverError, "configuration text"):
+                self.driver.get_config()
+            with self.assertRaisesRegex(DriverError, "candidate comparison"):
+                self.driver._compare()
+
+    def test_warning_rpc_does_not_leak_device_message(self):
+        original = self.channel.sendall
+
+        def warning(raw):
+            original(raw)
+            reply = ET.fromstring(self.channel.wire[:-len(DELIMITER)])
+            error = ET.SubElement(reply, "rpc-error")
+            ET.SubElement(error, "error-severity").text = "warning"
+            ET.SubElement(error, "error-message").text = "sensitive-device-detail"
+            self.channel.wire = ET.tostring(reply) + DELIMITER
+
+        self.channel.sendall = warning
+        self.assertEqual(self.driver.run_command("show version"), "operational output")
+        warning_only = ET.fromstring(
+            "<rpc-reply><rpc-error><error-severity>warning</error-severity>"
+            "<error-message>sensitive-device-detail</error-message></rpc-error></rpc-reply>"
+        )
+        self.assertNotIn("sensitive-device-detail", self.driver._output(warning_only))
+
 
 class BuilderTests(unittest.TestCase):
     def test_system_hostname(self):
@@ -437,9 +520,103 @@ class BuilderTests(unittest.TestCase):
         with self.assertRaises(DriverError):
             validation.build_change("manual", {"commands": ["commit"]})
 
+    def test_system_domain_and_timezone(self):
+        self.assertEqual(validation.build_change("system", {
+            "hostname": "edge", "domain_name": "example.net", "time_zone": "Europe/Copenhagen",
+        }), ["set system host-name edge", "set system domain-name example.net",
+             "set system time-zone Europe/Copenhagen"])
+
+    def test_interface_enable_disable_actions(self):
+        for operation, verb in (("enable", "delete"), ("disable", "set")):
+            self.assertEqual(validation.build_change("interfaces", {
+                "name": "ge-0/0/23", "operation": operation,
+            }), [f"{verb} interfaces ge-0/0/23 disable"])
+
+    def test_vlan_delete_and_remove_member_actions(self):
+        self.assertEqual(validation.build_change("vlans", {
+            "name": "office", "operation": "delete",
+        }), ["delete vlans office"])
+        self.assertEqual(validation.build_change("vlans", {
+            "name": "office", "operation": "remove_member", "interface": "ge-0/0/47",
+        }), ["delete interfaces ge-0/0/47 unit 0 family ethernet-switching vlan members office"])
+
+    def test_route_delete_action(self):
+        self.assertEqual(validation.build_change("routing", {
+            "prefix": "192.0.2.0/24", "operation": "delete",
+        }), ["delete routing-options static route 192.0.2.0/24"])
+        self.assertEqual(validation.build_change("routing", {
+            "prefix": "2001:db8::/32", "operation": "delete",
+        }), ["delete routing-options rib inet6.0 static route 2001:db8::/32"])
+
+    def test_lag_configure_delete_and_count_actions(self):
+        commands = validation.build_change("lag", {
+            "name": "ae2", "members": ["ge-0/0/46", "ge-0/0/47"],
+            "device_count": 3, "lacp": "active", "mode": "trunk", "vlans": ["office"],
+        })
+        self.assertIn("set chassis aggregated-devices ethernet device-count 3", commands)
+        self.assertIn("set interfaces ge-0/0/47 ether-options 802.3ad ae2", commands)
+        self.assertIn("set interfaces ae2 aggregated-ether-options lacp active", commands)
+        self.assertEqual(validation.build_change("lag", {
+            "name": "ae2", "members": ["ge-0/0/46", "ge-0/0/47"], "operation": "delete",
+        }), ["delete interfaces ge-0/0/46 ether-options 802.3ad",
+             "delete interfaces ge-0/0/47 ether-options 802.3ad",
+             "delete interfaces ae2"])
+        self.assertEqual(validation.build_change("lag", {
+            "device_count": 4, "operation": "device_count",
+        }), ["set chassis aggregated-devices ethernet device-count 4"])
+
+    def test_ntp_add_and_delete_actions(self):
+        for operation, verb in (("add", "set"), ("delete", "delete")):
+            self.assertEqual(validation.build_change("ntp", {
+                "server": "time.example.net", "operation": operation,
+            }), [f"{verb} system ntp server time.example.net"])
+
+    def test_snmp_add_delete_uses_environment_reference(self):
+        with patch.dict(os.environ, {"SNMP_TEST_REFERENCE": "test-readonly"}):
+            self.assertEqual(validation.build_change("snmp", {
+                "community_env": "SNMP_TEST_REFERENCE", "clients": ["192.0.2.0/24"],
+            }), ["set snmp community test-readonly authorization read-only",
+                 "delete snmp community test-readonly clients",
+                 "set snmp community test-readonly clients 192.0.2.0/24"])
+            self.assertEqual(validation.build_change("snmp", {
+                "community_env": "SNMP_TEST_REFERENCE", "operation": "delete",
+            }), ["delete snmp community test-readonly"])
+
+    def test_snmp_missing_or_unsafe_secret_never_echoed(self):
+        for value in ("", "secret;commit", "secret\ncommit"):
+            with patch.dict(os.environ, {"SNMP_TEST_REFERENCE": value}):
+                with self.assertRaises(DriverError) as error:
+                    validation.build_change("snmp", {"community_env": "SNMP_TEST_REFERENCE"})
+                self.assertNotIn("secret", str(error.exception))
+
+    def test_invalid_operations_and_operation_fields(self):
+        cases = [
+            ("system", {"hostname": "edge", "operation": "delete"}),
+            ("system", {"time_zone": "Europe/Copenhagen;commit"}),
+            ("interfaces", {"name": "ge-0/0/1", "operation": "disable", "mode": "trunk"}),
+            ("vlans", {"name": "v", "operation": "delete", "vlan_id": 2}),
+            ("vlans", {"name": "v", "operation": "remove_member"}),
+            ("routing", {"prefix": "192.0.2.0/24", "operation": "delete", "next_hop": "192.0.2.1"}),
+            ("lag", {"name": "ae2", "members": ["ge-0/0/1"], "device_count": 2}),
+            ("lag", {"name": "ae0", "members": []}),
+            ("lag", {"name": "ae0", "members": ["ae1"]}),
+            ("lag", {"name": "ae0", "members": ["ge-0/0/1", "ge-0/0/1"]}),
+            ("lag", {"name": "ae0", "members": ["ge-0/0/1"], "lacp": "bad"}),
+            ("lag", {"operation": "device_count", "device_count": 0}),
+            ("ntp", {"server": "time.example.net;commit"}),
+            ("ntp", {"server": "time.example.net", "operation": "commit"}),
+            ("snmp", {"community_env": "bad-reference"}),
+            ("snmp", {"community": "literal-secret"}),
+            ("vlans", {"name": "v", "vlan_id": 1, "operation": ["create"]}),
+        ]
+        for section, values in cases:
+            with self.subTest(section=section, values=values), self.assertRaises(DriverError):
+                validation.build_change(section, values)
+
     def test_invalid_builder_values(self):
         cases = [
             ("system", {"hostname": "bad;reboot"}),
+            ("system", {"hostname": "2001:db8::1"}),
             ("system", {}),
             ("system", {"hostname": "edge", "extra": "bad"}),
             ("interfaces", {"name": "ge-0/0/1;commit"}),
@@ -482,11 +659,11 @@ class PluginDriver(BaseDriver):
 class RegistryTests(unittest.TestCase):
     def setUp(self):
         self.device = SimpleNamespace(
-            address="192.0.2.1", port=830, username="netconf", credential_env="SWITCH_TEST_CREDENTIAL",
+            address="192.0.2.1", port=830, username="netconf", credential_env="SWITCH_CREDENTIAL_TEST",
             driver="juniper_ex", model="EX3300-24p",
         )
         self.settings = SimpleNamespace(SWITCH_KNOWN_HOSTS="trusted_hosts", SWITCH_TIMEOUT=8)
-        self.environment = patch.dict(os.environ, {"SWITCH_TEST_CREDENTIAL": "test-credential"})
+        self.environment = patch.dict(os.environ, {"SWITCH_CREDENTIAL_TEST": "test-credential"})
         self.environment.start()
         self.addCleanup(self.environment.stop)
 
@@ -517,9 +694,18 @@ class RegistryTests(unittest.TestCase):
         self.assertNotIn("test-credential", str(error.exception))
 
     def test_missing_credentials_safe(self):
-        del os.environ["SWITCH_TEST_CREDENTIAL"]
+        del os.environ["SWITCH_CREDENTIAL_TEST"]
         with self.assertRaisesRegex(DriverError, "credentials are unavailable"):
             registry._get_driver(self.device, self.settings)
+
+    def test_unrelated_environment_secrets_never_read(self):
+        for reference in ("DJANGO_SECRET_KEY", "PATH", "SWITCH_CREDENTIAL_",
+                          "SWITCH_CREDENTIAL_lowercase", "SWITCH_CREDENTIAL_TEST\n"):
+            self.device.credential_env = reference
+            with self.subTest(reference=reference), patch.object(os.environ, "get") as get:
+                with self.assertRaisesRegex(DriverError, "credential environment reference"):
+                    registry._get_driver(self.device, self.settings)
+                get.assert_not_called()
 
     def test_invalid_mapping_and_classes(self):
         for mapping in (

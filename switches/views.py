@@ -4,18 +4,32 @@ import json
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
+from django.db import transaction
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from . import services
-from .forms import ChangeForm, DiagnosticForm, DiscoveryForm, MonitorForm, SECTION_CHOICES, SwitchForm
-from .models import ConfigChange, ConfigRevision, DiscoveryRun, Job, Switch
+from .forms import BUILDERS, CONFIG_SECTION_CHOICES, ChangeForm, DiagnosticForm, DiscoveryForm, MonitorForm, SECTION_CHOICES, SwitchForm
+from .models import ConfigChange, ConfigRevision, DiscoveryRun, Job, Switch, SwitchAccess
 from .permissions import can_access, visible_switches
 
 
-READ_ACTIONS = {"sync", "monitor", "show", "command", "ping", "traceroute"}
+READ_ACTIONS = {"sync", "monitor", "ping", "traceroute"}
+OPERATIONAL_SECTIONS = {
+    "system", "uptime", "chassis", "chassis_env", "chassis_fpc", "health",
+    "interfaces", "interfaces_detail", "switching", "vlans", "routing",
+    "bgp", "ospf", "arp", "mac", "lldp", "poe", "alarms", "chassis_alarms",
+    "stp", "igmp", "dot1x", "port_security", "system_processes",
+}
+VIEWER_SNAPSHOT_KEYS = OPERATIONAL_SECTIONS | {"facts", "snmp_interfaces"}
+
+
+def viewer_job(job):
+    if job.action not in READ_ACTIONS:
+        return False
+    return job.action != "monitor" or job.payload.get("section") in OPERATIONAL_SECTIONS
 
 
 def device_for(request, pk, role="viewer"):
@@ -30,11 +44,15 @@ def detail_context(request, switch):
     jobs = switch.jobs.all()
     if not operator:
         jobs = jobs.filter(action__in=READ_ACTIONS)
+    snapshot = switch.snapshot
+    if not operator:
+        snapshot = {key: value for key, value in snapshot.items() if key in VIEWER_SNAPSHOT_KEYS} if isinstance(snapshot, dict) else {}
     return {
         "switch": switch, "operator": operator,
         "device_admin": can_access(request.user, switch, "admin"),
-        "snapshot_text": json.dumps(switch.snapshot, indent=2, ensure_ascii=False),
-        "jobs": jobs[:30], "revisions": switch.revisions.all()[:30] if operator else [],
+        "snapshot_text": json.dumps(snapshot, indent=2, ensure_ascii=False),
+        "jobs": list(jobs[:30]) if operator else [job for job in jobs[:100] if viewer_job(job)][:30],
+        "revisions": switch.revisions.all()[:30] if operator else [],
         "changes": switch.changes.exclude(status__in=["discarded", "applied"])[:20] if operator else [],
     }
 
@@ -51,11 +69,14 @@ def dashboard(request):
 def inventory(request, pk=None):
     if not request.user.has_perm("switches.manage_inventory"):
         raise PermissionDenied
-    switch = device_for(request, pk) if pk else None
+    switch = device_for(request, pk, "admin") if pk else None
     form = SwitchForm(request.POST or None, instance=switch)
     if request.method == "POST" and form.is_valid():
-        form.save()
-        messages.success(request, "Inventory saved. Device access is managed separately by an authorized administrator.")
+        with transaction.atomic():
+            saved = form.save()
+            if switch is None:
+                SwitchAccess.objects.create(switch=saved, user=request.user, role="admin")
+        messages.success(request, "Inventory saved. Other users' device access is managed by an authorized administrator.")
         return redirect("dashboard")
     return render(request, "switches/form.html", {"form": form, "title": "Edit switch" if pk else "Add switch"})
 
@@ -65,7 +86,12 @@ def inventory(request, pk=None):
 def detail(request, pk):
     switch = device_for(request, pk)
     context = detail_context(request, switch)
-    context.update(change_form=ChangeForm(), monitor_form=MonitorForm(), diagnostic_form=DiagnosticForm(), sections=SECTION_CHOICES)
+    context.update(
+        change_form=ChangeForm(), monitor_form=MonitorForm(),
+        diagnostic_form=DiagnosticForm(allow_show=context["operator"]),
+        sections=SECTION_CHOICES + CONFIG_SECTION_CHOICES if context["operator"] else [(value, label) for value, label in SECTION_CHOICES if value in OPERATIONAL_SECTIONS],
+        builders=[(section, form(prefix=section)) for section, form in BUILDERS.items()] if context["operator"] else [],
+    )
     return render(request, "switches/detail.html", context)
 
 
@@ -83,7 +109,11 @@ def status(request, pk):
 @require_POST
 def action(request, pk):
     action = request.POST.get("action", "")
-    role = "admin" if action == "reboot" else "viewer"
+    role = "viewer"
+    if action == "reboot":
+        role = "admin"
+    elif action in {"show", "command"} or (action == "monitor" and request.POST.get("section") not in OPERATIONAL_SECTIONS):
+        role = "operator"
     switch = device_for(request, pk, role)
     payload = {}
     if action == "monitor":
@@ -114,17 +144,25 @@ def action(request, pk):
 @require_POST
 def stage(request, pk):
     switch = device_for(request, pk, "operator")
-    form = ChangeForm(request.POST)
+    section = request.POST.get("builder_section")
+    if section and section not in BUILDERS:
+        raise PermissionDenied
+    form = BUILDERS[section](request.POST, prefix=section) if section else ChangeForm(request.POST)
     if form.is_valid():
+        from .drivers.base import DriverError
+        from .drivers.registry import get_driver
         try:
-            change = services.stage_change(switch, form.cleaned_data["commands"], request.user)
+            commands = "\n".join(
+                get_driver(switch).build_change(getattr(form, "driver_section", section), form.values())
+            ) if section else form.cleaned_data["commands"]
+            change = services.stage_change(switch, commands, request.user)
             if form.cleaned_data["immediate"]:
                 services.queue_change(change, action="apply", user=request.user)
             messages.success(request, "Change staged." + (" Apply queued." if form.cleaned_data["immediate"] else " Preview before committing."))
             return redirect("switch-detail", pk=pk)
-        except ValueError as exc:
+        except (ValueError, DriverError) as exc:
             form.add_error(None, str(exc))
-    return render(request, "switches/form.html", {"form": form, "title": "Stage configuration"})
+    return render(request, "switches/form.html", {"form": form, "title": "Stage configuration", "builder_section": section})
 
 
 @login_required
@@ -179,7 +217,7 @@ def restore(request, pk, revision_id):
 def job(request, pk, job_id):
     switch = device_for(request, pk)
     job = get_object_or_404(Job, switch=switch, pk=job_id)
-    if job.action not in READ_ACTIONS and not can_access(request.user, switch, "operator"):
+    if not viewer_job(job) and not can_access(request.user, switch, "operator"):
         raise PermissionDenied
     return render(request, "switches/job.html", {"switch": switch, "job": job})
 

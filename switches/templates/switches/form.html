@@ -1,2 +1,2 @@
 {% extends 'switches/base.html' %}
-{% block content %}<a class="back" href="{% url 'dashboard' %}">← Fleet</a><section class="panel form-panel"><h1>{{ title }}</h1><form method="post">{% csrf_token %}{{ form.as_p }}<button>Save</button></form></section>{% endblock %}
+{% block content %}<a class="back" href="{% url 'dashboard' %}">← Fleet</a><section class="panel form-panel"><h1>{{ title }}</h1><form method="post">{% csrf_token %}{% if builder_section %}<input type="hidden" name="builder_section" value="{{ builder_section }}">{% endif %}{{ form.as_p }}<button>Save</button></form></section>{% endblock %}

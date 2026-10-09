@@ -69,7 +69,7 @@ class ConfigRevision(models.Model):
 
 class ConfigChange(models.Model):
     switch = models.ForeignKey(Switch, on_delete=models.CASCADE, related_name="changes")
-    base_revision = models.ForeignKey(ConfigRevision, on_delete=models.PROTECT)
+    base_revision = models.ForeignKey(ConfigRevision, on_delete=models.RESTRICT)
     commands = EncryptedTextField()
     status = models.CharField(max_length=20, default="pending")
     created_at = models.DateTimeField(auto_now_add=True)

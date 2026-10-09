@@ -17,6 +17,7 @@ from .services import (
 )
 from .tasks import acquire_switch, discover_switches, execute_job, poll_switches
 from .snmp import collect_interfaces, COLUMNS
+from .checks import encryption_check
 
 
 class BackendTests(TestCase):
@@ -69,6 +70,11 @@ class BackendTests(TestCase):
         new = record_revision(self.switch, "system { host-name new; }")
         self.assertEqual(self.switch.revisions.first(), new)
 
+    @override_settings(CONFIG_ENCRYPTION_KEY="")
+    def test_encryption_key_is_required_at_startup(self):
+        errors = encryption_check(None)
+        self.assertEqual([error.id for error in errors], ["switches.E001"])
+
     def test_json_and_job_output_encrypted_at_rest(self):
         self.switch.snapshot = {"password": "sensitive-example"}
         self.switch.save()
@@ -104,6 +110,10 @@ class BackendTests(TestCase):
             queue_job(self.switch, "reboot", {}, self.user)
         with self.assertRaises(ValueError):
             queue_job(self.switch, "unsupported", {}, self.user)
+        with self.assertRaises(ValueError):
+            queue_job(self.switch, "command", {"command": "show configuration"}, self.viewer)
+        with self.assertRaises(ValueError):
+            queue_job(self.switch, "monitor", {"section": "services"}, self.viewer)
         with patch("switches.services.publish_job") as publish:
             with self.captureOnCommitCallbacks(execute=True):
                 job = queue_job(self.switch, "sync", {}, self.viewer)
@@ -136,6 +146,13 @@ class BackendTests(TestCase):
         revision = record_revision(other, "another config")
         with self.assertRaises(ValueError):
             queue_restore(self.switch, revision, self.user)
+
+    def test_switch_deletion_can_remove_its_dependent_revision_history(self):
+        stage_change(self.switch, "set system host-name new", self.user)
+        switch_id = self.switch.pk
+        self.switch.delete()
+        self.assertFalse(Switch.objects.filter(pk=switch_id).exists())
+        self.assertFalse(ConfigRevision.objects.filter(switch_id=switch_id).exists())
 
     def test_switch_lock_is_exclusive(self):
         self.assertIsNotNone(acquire_switch(self.switch.pk))

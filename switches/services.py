@@ -14,10 +14,22 @@ from .permissions import can_access
 
 logger = logging.getLogger(__name__)
 ACTION_ROLES = {
-    "sync": "viewer", "monitor": "viewer", "command": "viewer",
+    "sync": "viewer", "monitor": "viewer", "command": "operator",
     "ping": "viewer", "traceroute": "viewer", "reboot": "admin",
     "preview": "operator", "apply": "operator", "restore": "operator",
 }
+PUBLIC_MONITOR_SECTIONS = frozenset({
+    "system", "uptime", "chassis", "chassis_env", "chassis_fpc", "health",
+    "interfaces", "interfaces_detail", "switching", "vlans", "routing",
+    "bgp", "ospf", "arp", "mac", "lldp", "poe", "alarms", "chassis_alarms",
+    "stp", "igmp", "dot1x", "port_security", "system_processes",
+})
+
+
+def action_role(action, payload):
+    if action == "monitor" and payload.get("section") not in PUBLIC_MONITOR_SECTIONS:
+        return "operator"
+    return ACTION_ROLES[action]
 
 
 def notify_switch(switch_id):
@@ -48,18 +60,20 @@ def publish_job(job_id):
                 pk=queued.payload.get("change_id"), switch_id=queued.switch_id,
                 status=f"{queued.action}ing",
             ).update(status="pending")
+        notify_switch(queued.switch_id)
 
 
 def queue_job(switch, action, payload, user):
     if action not in ACTION_ROLES:
         raise ValueError("Unsupported operation.")
-    if not can_access(user, switch, ACTION_ROLES[action]):
+    if not can_access(user, switch, action_role(action, payload)):
         raise ValueError("You do not have permission for this operation.")
     if not switch.active:
         raise ValueError("This switch is inactive.")
     with transaction.atomic():
         job = Job.objects.create(switch=switch, action=action, payload=payload, created_by=user)
         transaction.on_commit(lambda: publish_job(job.pk))
+        transaction.on_commit(lambda: notify_switch(switch.pk))
     return job
 
 
@@ -80,9 +94,11 @@ def stage_change(switch, commands, user):
     revision = switch.revisions.first()
     if revision is None:
         raise ValueError("Synchronize the switch before staging configuration.")
-    return ConfigChange.objects.create(
+    change = ConfigChange.objects.create(
         switch=switch, base_revision=revision, commands="\n".join(lines), created_by=user,
     )
+    transaction.on_commit(lambda: notify_switch(switch.pk))
+    return change
 
 
 def discard_change(change, user):
@@ -90,6 +106,7 @@ def discard_change(change, user):
         raise ValueError("You do not have permission to discard this change.")
     if not ConfigChange.objects.filter(pk=change.pk, status="pending").update(status="discarded"):
         raise ValueError("Only pending changes can be discarded.")
+    transaction.on_commit(lambda: notify_switch(change.switch_id))
 
 
 def queue_change(change, action="preview", user=None):

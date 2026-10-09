@@ -84,13 +84,64 @@ class WebTests(TestCase):
         cases = [
             ({"action": "sync"}, "sync", {}),
             ({"action": "monitor", "section": "lldp"}, "monitor", {"section": "lldp"}),
-            ({"action": "show", "value": "show interfaces terse"}, "command", {"command": "show interfaces terse"}),
             ({"action": "ping", "value": "192.0.2.10"}, "ping", {"target": "192.0.2.10"}),
             ({"action": "traceroute", "value": "192.0.2.10"}, "traceroute", {"target": "192.0.2.10"}),
         ]
         for data, action, payload in cases:
             self.assertEqual(self.client.post(self.url("switch-action"), data).status_code, 302)
             queue.assert_called_with(self.switch, action, payload, self.viewer)
+
+    def test_viewer_snapshot_filters_configuration_and_sensitive_monitor_jobs(self):
+        self.switch.snapshot = {
+            "facts": {"hostname": "edge"}, "lldp": "neighbor-edge",
+            "interfaces": "ge-0/0/1 up", "snmp_interfaces": [{"name": "ge-0/0/1"}],
+            "config": "private-full-config", "system_config": "private-system-config",
+            "interfaces_config": "private-interface-config", "services": "private-community",
+            "security": "private-firewall-config", "unknown_config": "private-unknown",
+            "syslog": "private-log-content", "errors": {"config": "private-error"},
+        }
+        self.switch.save()
+        secret_jobs = [
+            Job.objects.create(switch=self.switch, action="command", output="private-command-output"),
+            Job.objects.create(switch=self.switch, action="monitor", payload={"section": "services"}, output="private-services-output"),
+            Job.objects.create(switch=self.switch, action="monitor", payload={"section": "system_config"}, output="private-config-output"),
+        ]
+        for name in ["switch-detail", "switch-status"]:
+            response = self.client.get(self.url(name))
+            body = response.json()["html"] if name == "switch-status" else response.content.decode()
+            self.assertNotIn("private-", body)
+            self.assertIn("neighbor-edge", body)
+            for job in secret_jobs:
+                self.assertNotIn(reverse("job-detail", args=[self.switch.pk, job.pk]), body)
+        for job in secret_jobs:
+            self.assertEqual(self.client.get(reverse("job-detail", args=[self.switch.pk, job.pk])).status_code, 403)
+        self.client.force_login(self.operator)
+        self.assertContains(self.client.get(self.url("switch-detail")), "private-community")
+        self.assertEqual(self.client.get(reverse("job-detail", args=[self.switch.pk, secret_jobs[0].pk])).status_code, 200)
+
+    def test_viewer_cannot_queue_configuration_monitor_or_manual_show(self):
+        with patch("switches.views.services.queue_job") as queue:
+            for payload in [
+                {"action": "show", "value": "show configuration"},
+                {"action": "monitor", "section": "services"},
+                {"action": "monitor", "section": "security"},
+                {"action": "monitor", "section": "system_config"},
+            ]:
+                self.assertEqual(self.client.post(self.url("switch-action"), payload).status_code, 403)
+            queue.assert_not_called()
+        response = self.client.get(self.url("switch-detail"))
+        self.assertNotContains(response, "Show command")
+        self.assertNotContains(response, 'name="section" value="services"')
+        self.assertNotContains(response, 'name="section" value="security"')
+
+    @patch("switches.views.services.queue_job")
+    def test_operator_can_queue_manual_show_and_configuration_monitors(self, queue):
+        self.client.force_login(self.operator)
+        self.assertEqual(self.client.post(self.url("switch-action"), {"action": "show", "value": "show configuration"}).status_code, 302)
+        queue.assert_called_with(self.switch, "command", {"command": "show configuration"}, self.operator)
+        for section in ["services", "security", "system_config", "interfaces_config", "vlans_config", "routing_config"]:
+            self.assertEqual(self.client.post(self.url("switch-action"), {"action": "monitor", "section": section}).status_code, 302)
+            queue.assert_called_with(self.switch, "monitor", {"section": section}, self.operator)
 
     def test_invalid_monitor_and_action_are_rejected(self):
         with patch("switches.views.services.queue_job") as queue:
@@ -106,6 +157,75 @@ class WebTests(TestCase):
             change = ConfigChange.objects.first()
             self.assertEqual(change.commands, "set system host-name new")
             queue.assert_called_once_with(change, action="apply", user=self.operator)
+
+    def test_structured_builder_stages_driver_commands(self):
+        self.client.force_login(self.operator)
+        with patch("switches.drivers.registry.get_driver") as factory:
+            factory.return_value.build_change.return_value = ["set system host-name edge-new"]
+            response = self.client.post(self.url("switch-stage"), {"builder_section": "system", "system-hostname": "edge-new"})
+            self.assertEqual(response.status_code, 302)
+            factory.return_value.build_change.assert_called_once_with("system", {"hostname": "edge-new"})
+            self.assertEqual(ConfigChange.objects.first().commands, "set system host-name edge-new")
+
+    def test_structured_builder_reports_safe_driver_errors(self):
+        from .drivers.base import DriverError
+        self.client.force_login(self.operator)
+        with patch("switches.drivers.registry.get_driver", side_effect=DriverError("Switch SSH credentials are unavailable.")):
+            response = self.client.post(self.url("switch-stage"), {"builder_section": "system", "system-hostname": "edge-new"})
+            self.assertContains(response, "Switch SSH credentials are unavailable.")
+            self.assertContains(response, 'name="builder_section"')
+
+    def test_common_structured_actions_use_validated_driver_builder(self):
+        from .drivers.validation import build_change
+        self.client.force_login(self.operator)
+        cases = [
+            ("system", {"hostname": "edge"}, "set system host-name edge"),
+            ("domain", {"domain": "example.net", "operation": "set"}, "set system domain-name example.net"),
+            ("vlans", {"name": "users", "vlan_id": 10}, "set vlans users vlan-id 10"),
+            ("vlan_actions", {"name": "users", "operation": "delete"}, "delete vlans users"),
+            ("vlan_actions", {"name": "users", "operation": "remove_member", "interface": "ge-0/0/1"}, "delete interfaces ge-0/0/1 unit 0 family ethernet-switching vlan members users"),
+            ("interfaces", {"name": "ge-0/0/1", "admin_state": "down"}, "set interfaces ge-0/0/1 disable"),
+            ("interfaces", {"name": "ge-0/0/1", "mode": "access", "vlans": "users"}, "set interfaces ge-0/0/1 unit 0 family ethernet-switching port-mode access"),
+            ("lag", {"operation": "configure", "name": "ae0", "members": "ge-0/0/1,ge-0/0/2"}, "set interfaces ge-0/0/2 ether-options 802.3ad ae0"),
+            ("lag", {"operation": "delete", "name": "ae0", "members": "ge-0/0/1"}, "delete interfaces ge-0/0/1 ether-options 802.3ad"),
+            ("lag", {"operation": "device_count", "device_count": 4}, "set chassis aggregated-devices ethernet device-count 4"),
+            ("static_route", {"operation": "set", "prefix": "198.51.100.0/24", "next_hop": "192.0.2.254"}, "set routing-options static route 198.51.100.0/24 next-hop 192.0.2.254"),
+            ("static_route", {"operation": "delete", "prefix": "198.51.100.0/24"}, "delete routing-options static route 198.51.100.0/24"),
+            ("ntp", {"operation": "set", "server": "192.0.2.10"}, "set system ntp server 192.0.2.10"),
+            ("ntp", {"operation": "delete", "server": "192.0.2.10"}, "delete system ntp server 192.0.2.10"),
+            ("snmp_community", {"operation": "set", "community": "test-readonly"}, "set snmp community test-readonly authorization read-only"),
+            ("snmp_community", {"operation": "delete", "community": "test-readonly"}, "delete snmp community test-readonly"),
+        ]
+        with patch("switches.drivers.registry.get_driver") as factory:
+            factory.return_value.build_change.side_effect = build_change
+            for section, values, command in cases:
+                with self.subTest(section=section, values=values):
+                    data = {"builder_section": section, **{f"{section}-{key}": value for key, value in values.items()}}
+                    self.assertEqual(self.client.post(self.url("switch-stage"), data).status_code, 302)
+                    self.assertIn(command, ConfigChange.objects.first().commands.splitlines())
+
+    def test_common_structured_actions_reject_injection_and_missing_fields(self):
+        self.client.force_login(self.operator)
+        cases = [
+            ("domain", {"domain": "example.net;reboot", "operation": "set"}),
+            ("vlan_actions", {"name": "users", "operation": "remove_member"}),
+            ("lag", {"operation": "configure", "name": "ae0", "members": "ge-0/0/1;reboot"}),
+            ("lag", {"operation": "device_count"}),
+            ("static_route", {"operation": "set", "prefix": "198.51.100.0/24", "next_hop": "2001:db8::1"}),
+            ("ntp", {"operation": "set", "server": "192.0.2.1;reboot"}),
+            ("snmp_community", {"operation": "set", "community": "unsafe|value"}),
+        ]
+        with patch("switches.drivers.registry.get_driver") as factory:
+            for section, values in cases:
+                with self.subTest(section=section):
+                    data = {"builder_section": section, **{f"{section}-{key}": value for key, value in values.items()}}
+                    self.assertEqual(self.client.post(self.url("switch-stage"), data).status_code, 200)
+            factory.assert_not_called()
+
+    def test_revoked_grant_takes_effect_on_next_http_request(self):
+        SwitchAccess.objects.filter(user=self.viewer).delete()
+        self.assertEqual(self.client.get(self.url("switch-status")).status_code, 403)
+        self.assertEqual(self.client.post(self.url("switch-action"), {"action": "sync"}).status_code, 403)
 
     def test_stage_invalid_command_and_missing_sync(self):
         self.client.force_login(self.operator)
@@ -130,6 +250,10 @@ class WebTests(TestCase):
         foreign = ConfigRevision.objects.create(switch=self.other, config="foreign", checksum="b" * 64)
         self.assertEqual(self.client.get(reverse("revision-detail", args=[self.switch.pk, foreign.pk])).status_code, 404)
         self.assertEqual(self.client.post(reverse("revision-restore", args=[self.switch.pk, foreign.pk])).status_code, 404)
+        foreign_change = ConfigChange.objects.create(switch=self.other, base_revision=foreign, commands="set system host-name x")
+        foreign_job = Job.objects.create(switch=self.other, action="monitor", output="private")
+        self.assertEqual(self.client.post(reverse("change-action", args=[self.switch.pk, foreign_change.pk]), {"action": "discard"}).status_code, 404)
+        self.assertEqual(self.client.get(reverse("job-detail", args=[self.switch.pk, foreign_job.pk])).status_code, 404)
 
     def test_revision_and_job_escape_output(self):
         self.client.force_login(self.operator)
@@ -184,6 +308,58 @@ class WebTests(TestCase):
         self.assertContains(response, "Select a valid choice")
         self.assertFalse(Switch.objects.filter(name="Invalid").exists())
 
+    def test_inventory_creation_grants_only_creator_admin_and_edit_requires_admin(self):
+        self.viewer.user_permissions.add(Permission.objects.get(codename="manage_inventory"))
+        data = {"name": "Added", "address": "192.0.2.5", "port": 22, "driver": "juniper_ex", "username": "user", "credential_env": "SWITCH_CREDENTIAL_TEST", "active": "on"}
+        self.assertEqual(self.client.post(reverse("switch-add"), data).status_code, 302)
+        added = Switch.objects.get(name="Added")
+        self.assertEqual(list(added.access.values_list("user_id", "role")), [(self.viewer.pk, "admin")])
+        self.assertEqual(self.client.get(reverse("switch-edit", args=[added.pk])).status_code, 200)
+        self.assertContains(self.client.get("/"), "Added")
+        self.assertEqual(self.client.post(self.url("switch-edit"), data).status_code, 403)
+        SwitchAccess.objects.filter(switch=self.switch, user=self.viewer).update(role="admin")
+        data.update(name="Edge edited", address=self.switch.address)
+        self.assertEqual(self.client.post(self.url("switch-edit"), data).status_code, 302)
+        self.switch.refresh_from_db()
+        self.assertEqual(self.switch.name, "Edge edited")
+
+    def test_optional_snmp_inventory_fields(self):
+        self.viewer.user_permissions.add(Permission.objects.get(codename="manage_inventory"))
+        data = {"name": "SNMP edge", "address": "192.0.2.6", "port": 22, "driver": "juniper_ex", "username": "user", "credential_env": "SWITCH_CREDENTIAL_TEST", "active": "on"}
+        self.assertEqual(self.client.post(reverse("switch-add"), data).status_code, 302)
+        switch = Switch.objects.get(address=data["address"])
+        self.assertFalse(switch.snmp_enabled)
+        self.assertEqual(switch.snmp_port, 161)
+        self.assertEqual(switch.access.get(user=self.viewer).role, "admin")
+        edit_url = reverse("switch-edit", args=[switch.pk])
+        data["snmp_enabled"] = "on"
+        self.assertContains(self.client.post(edit_url, data), "Choose a community environment variable")
+        data["snmp_credential_env"] = "public"
+        self.assertContains(self.client.post(edit_url, data), "Use a SWITCH_CREDENTIAL_")
+        data.update(snmp_credential_env="SWITCH_CREDENTIAL_SNMP", snmp_port=1161)
+        self.assertEqual(self.client.post(edit_url, data).status_code, 302)
+        switch.refresh_from_db()
+        self.assertTrue(switch.snmp_enabled)
+        self.assertEqual(switch.snmp_credential_env, "SWITCH_CREDENTIAL_SNMP")
+        self.assertEqual(switch.snmp_port, 1161)
+
+    def test_inventory_edit_requires_both_admin_role_and_inventory_permission(self):
+        self.client.force_login(self.admin)
+        self.assertEqual(self.client.get(self.url("switch-edit")).status_code, 403)
+        self.admin.user_permissions.add(Permission.objects.get(codename="manage_inventory"))
+        self.assertEqual(self.client.get(self.url("switch-edit")).status_code, 200)
+        self.operator.user_permissions.add(Permission.objects.get(codename="manage_inventory"))
+        self.client.force_login(self.operator)
+        self.assertEqual(self.client.get(self.url("switch-edit")).status_code, 403)
+        self.assertEqual(self.client.post(self.url("switch-edit"), {}).status_code, 403)
+        self.assertNotContains(self.client.get(self.url("switch-detail")), "Edit inventory")
+
+    @patch("switches.views.services.queue_restore")
+    def test_operator_restores_owned_revision(self, queue):
+        self.client.force_login(self.operator)
+        self.assertEqual(self.client.post(reverse("revision-restore", args=[self.switch.pk, self.revision.pk])).status_code, 302)
+        queue.assert_called_once_with(self.switch, self.revision, self.operator)
+
     @override_settings(DISCOVERY_NETWORKS=["192.0.2.0/24", "10.0.0.0/8"])
     def test_discovery_requires_permission_and_bounded_allowlist(self):
         self.assertEqual(self.client.get(reverse("discovery")).status_code, 403)
@@ -235,6 +411,28 @@ class WebsocketTests(TransactionTestCase):
                 connected, _ = await communicator.connect()
                 self.assertFalse(connected)
                 await communicator.disconnect()
+        async_to_sync(check)()
+
+    def test_authenticated_without_device_grant_denied(self):
+        self.grant.delete()
+        async def check():
+            communicator = self.communicator()
+            connected, _ = await communicator.connect()
+            self.assertFalse(connected)
+            await communicator.disconnect()
+        async_to_sync(check)()
+
+    def test_revocation_checked_on_client_message(self):
+        async def check():
+            communicator = self.communicator()
+            connected, _ = await communicator.connect()
+            self.assertTrue(connected)
+            await database_sync_to_async(lambda: SwitchAccess.objects.filter(pk=self.grant.pk).delete())()
+            await communicator.send_json_to({"event": "poll"})
+            response = await communicator.receive_output(timeout=2)
+            self.assertEqual(response["type"], "websocket.close")
+            self.assertEqual(response["code"], 4403)
+            await communicator.disconnect()
         async_to_sync(check)()
 
     def test_event_contains_only_notification(self):

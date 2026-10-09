@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from .models import ConfigChange, ConfigRevision, DiscoveryRun, Job, Switch
 from .permissions import can_access
-from .services import ACTION_ROLES, notify_switch, publish_job, record_revision, validate_network
+from .services import ACTION_ROLES, action_role, notify_switch, publish_job, record_revision, validate_network
 
 
 def get_driver(device):
@@ -60,7 +60,7 @@ def execute_job(job_id):
         if job.created_by is None:
             if job.action != "sync":
                 raise ValueError("Operation has no authorized user.")
-        elif not can_access(job.created_by, switch, ACTION_ROLES[job.action]):
+        elif not can_access(job.created_by, switch, action_role(job.action, job.payload)):
             raise ValueError("Permission was revoked before operation execution.")
         token = acquire_switch(switch.pk)
         if token is None:
@@ -136,11 +136,12 @@ def poll_switches():
                 status=f"{expired.action}ing",
             ).update(status="pending")
         notify_switch(expired.switch_id)
-    for switch in Switch.objects.filter(active=True):
+    for switch in Switch.objects.filter(active=True).defer("snapshot"):
         if switch.jobs.filter(status__in=["queued", "running"]).exists():
             continue
-        job = Job.objects.create(switch=switch, action="sync")
-        publish_job(job.pk)
+        with transaction.atomic():
+            job = Job.objects.create(switch=switch, action="sync")
+            transaction.on_commit(lambda job_id=job.pk: publish_job(job_id))
 
 
 @shared_task(time_limit=21600)
