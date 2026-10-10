@@ -217,7 +217,8 @@ class DiscoveryCredentialTests(TestCase):
         driver.assert_not_called()
         run.refresh_from_db()
         self.assertEqual(run.status, "success")
-        self.assertEqual(run.results, [candidate])
+        from .profiles import annotate
+        self.assertEqual(run.results, [annotate(candidate)])
         self.assertFalse(Switch.objects.exists())
 
     def test_revoked_scan_permission_prevents_network_contact(self):

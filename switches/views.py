@@ -44,6 +44,7 @@ def device_for(request, pk, role="viewer"):
 def detail_context(request, switch):
     from .drivers.registry import driver_class
     from .drivers.base import DriverError
+    registered = None
     try:
         registered = driver_class(switch.driver)
         capabilities = registered.capabilities
@@ -67,16 +68,28 @@ def detail_context(request, switch):
         "supports_cli": "run_command" in capabilities,
         "supports_diagnostics": "diagnostic" in capabilities,
         "supports_restore": "restore" in capabilities,
+        "combined_changes": registered is not None and registered.combined_changes,
+        "https_offer": "https_enable" in capabilities and switch.management_protocol == "http",
+        "https_pending": switch.https_pending if can_access(request.user, switch, "admin") else {},
+        "change_form": ChangeForm(), "delete_form": DeleteForm(),
+        "diagnostic_form": DiagnosticForm(allow_show=operator),
+        "sections": [(value, label) for value, label in SECTION_CHOICES + (CONFIG_SECTION_CHOICES if operator else [])
+                     if registered is not None and value in registered.monitor_sections
+                     and (operator or value in OPERATIONAL_SECTIONS)],
     }
+    context["change_form"].fields.pop("immediate")
     if operator:
         from .configuration import SECTIONS, current_state
         if context["web_driver"]:
             from .netgear_configuration import SECTIONS
         from .drivers.base import DriverError
         try:
+            if registered is None:
+                raise DriverError("No registered profile is available for this switch.")
             revision, state = current_state(switch)
             context["configuration_sections"] = [
-                {"slug": slug, "label": label, "rows": state[slug]} for slug, label in SECTIONS.items()
+                {"slug": slug, "label": label, "rows": state[slug], "can_add": slug in registered.configuration_add_sections}
+                for slug, label in SECTIONS.items() if slug in registered.configuration_sections
             ]
             context["configuration_revision"] = revision
         except DriverError as error:
@@ -92,9 +105,11 @@ def configuration_editor(request, pk, section):
     from .drivers.base import DriverError
 
     switch = device_for(request, pk, "operator")
+    from .drivers.registry import driver_class
+    registered = driver_class(switch.driver)
     if switch.driver == "netgear_gs108tv2":
         from .netgear_configuration import SECTIONS, EditorForm, current_state, stage_editor
-    if section not in SECTIONS:
+    if section not in SECTIONS or section not in registered.configuration_sections:
         raise PermissionDenied
     try:
         revision, state = current_state(switch)
@@ -152,7 +167,8 @@ def inventory(request, pk=None):
             saved = form.save()
             if switch is None:
                 SwitchAccess.objects.create(switch=saved, user=request.user, role="admin")
-        messages.success(request, "Inventory saved. Other users' device access is managed by an authorized administrator.")
+        from .drivers.registry import driver_class
+        messages.success(request, f"Inventory saved using {driver_class(saved.driver).profile_label or saved.driver}. Synchronize to verify the device model and collect its supported settings.")
         return redirect("dashboard")
     return render(request, "switches/form.html", {"form": form, "title": "Edit switch" if pk else "Add switch"})
 
@@ -178,19 +194,33 @@ def delete_inventory(request, pk):
 
 
 @login_required
+@require_POST
+@never_cache
+def https_setup(request, pk):
+    switch = device_for(request, pk, "admin")
+    action = request.POST.get("action")
+    if action not in {"https_enable", "https_use"} or request.POST.get("confirm") != "yes":
+        raise PermissionDenied
+    try:
+        payload = {}
+        if action == "https_use":
+            fingerprint = request.POST.get("fingerprint")
+            if not isinstance(switch.https_pending, dict) or not switch.https_pending or fingerprint != switch.https_pending.get("fingerprint"):
+                raise ValueError("Certificate approval changed. Reopen the workspace.")
+            payload = {"fingerprint": fingerprint}
+        services.queue_job(switch, action, payload, request.user)
+        messages.success(request, "HTTPS operation queued. See job output and the certificate approval panel.")
+    except ValueError as error:
+        messages.error(request, str(error))
+    return redirect("switch-detail", pk=pk)
+
+
+@login_required
 @require_GET
 @never_cache
 def detail(request, pk):
     switch = device_for(request, pk)
     context = detail_context(request, switch)
-    context.update(
-        change_form=ChangeForm(), delete_form=DeleteForm(), monitor_form=MonitorForm(),
-        diagnostic_form=DiagnosticForm(allow_show=context["operator"]),
-        sections=SECTION_CHOICES + CONFIG_SECTION_CHOICES if context["operator"] else [(value, label) for value, label in SECTION_CHOICES if value in OPERATIONAL_SECTIONS],
-    )
-    context["change_form"].fields.pop("immediate")
-    if context["web_driver"]:
-        context["sections"] = [(value, label) for value, label in SECTION_CHOICES if value in {"system", "interfaces", "vlans"}]
     return render(request, "switches/detail.html", context)
 
 
@@ -367,8 +397,10 @@ def discovery(request):
         except ValueError as exc:
             form.add_error(None, str(exc))
     runs = DiscoveryRun.objects.all() if request.user.is_superuser else DiscoveryRun.objects.filter(created_by=request.user)
+    from .profiles import choices, discovery_runs
     return render(request, "switches/discovery.html", {
-        "form": form, "runs": runs.order_by("-created_at", "-pk")[:20], "credentials": Credential.objects.defer("password"),
+        "form": form, "runs": discovery_runs(list(runs.order_by("-created_at", "-pk")[:20])),
+        "profile_choices": choices(), "credentials": Credential.objects.defer("password"),
     })
 
 
@@ -385,7 +417,14 @@ def confirm_candidate(request, run_id):
         raise PermissionDenied
     data = request.POST.copy()
     data["network"] = f"{address}/{'128' if ':' in address else '32'}"
-    data["driver"] = run.driver
+    candidate = next(item for item in run.results if item.get("address") == address)
+    from .profiles import resolve
+    from .drivers.base import DriverError
+    selected = request.POST.get("driver", run.driver)
+    try:
+        data["driver"] = resolve(candidate)[0] if selected == "auto" else selected
+    except DriverError as error:
+        return JsonResponse({"status": "error", "message": str(error)}, status=400)
     data["port"] = request.POST.get("port", run.port)
     form = DiscoveryForm(data)
     if form.is_valid() and form.cleaned_data.get("credential"):
@@ -396,6 +435,7 @@ def confirm_candidate(request, run_id):
             result = verify_candidate(
                 run, address, form.cleaned_data["credential"], form.cleaned_data["port"],
                 request.user, request.session.session_key, request.POST.get("trust_token", ""),
+                profile=form.cleaned_data["driver"],
             )
             return JsonResponse(result)
         except DriverError as error:
@@ -409,7 +449,7 @@ def confirm_candidate(request, run_id):
                 "status": "error", "message": "Unexpected verification failure. Check the application logs.",
             }, status=500)
     return JsonResponse({
-        "status": "error", "message": "Select an available credential and a valid SSH/NETCONF port.",
+        "status": "error", "message": "Select a compatible registered profile, an available credential and a valid management port.",
     }, status=400)
 
 

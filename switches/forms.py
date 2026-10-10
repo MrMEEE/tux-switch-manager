@@ -2,7 +2,6 @@ import ipaddress
 import re
 
 from django import forms
-from django.conf import settings
 
 from .models import Credential, Switch, credential_validator
 
@@ -74,13 +73,21 @@ class SwitchForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["driver"].choices = [(slug, slug.replace("_", " ").title()) for slug in settings.SWITCH_DRIVERS]
+        self.original_identity = (self.instance.address, self.instance.port, self.instance.driver)
+        from .profiles import choices
+        profile_field = self.fields["driver"]
+        if isinstance(profile_field, forms.ChoiceField):
+            profile_field.choices = choices()
+        self.fields["driver"].label = "Switch profile"
         self.fields["port"].label = "Management port"
         self.fields["port"].required = False
         self.fields["port"].help_text = "Leave blank for the driver default: SSH 22 or NETGEAR HTTP 80."
         if not self.instance.pk and not self.is_bound:
             self.initial["port"] = ""
-        self.fields["credential"].queryset = Credential.objects.defer("password")
+            self.initial["driver"] = "auto"
+        credential_field = self.fields["credential"]
+        if isinstance(credential_field, forms.ModelChoiceField):
+            credential_field.queryset = Credential.objects.defer("password")
         self.fields["credential"].widget.attrs["data-live-url"] = "/ws/live/credential-options/"
         self.fields["credential"].help_text = "Choose a saved credential. NETGEAR GS108Tv2 uses only its password, over unencrypted HTTP."
         if self.instance.pk and self.instance.username and self.instance.credential_env:
@@ -94,6 +101,17 @@ class SwitchForm(forms.ModelForm):
 
     def clean(self):
         cleaned = super().clean()
+        if cleaned.get("driver") == "auto" and cleaned.get("address"):
+            from .discovery import probe_candidate
+            from .profiles import resolve
+            from .drivers.base import DriverError
+            try:
+                slug, port = resolve(probe_candidate(cleaned["address"], cleaned.get("port") or 22))
+                cleaned["driver"] = slug
+                if cleaned.get("port") is None:
+                    cleaned["port"] = port
+            except DriverError as error:
+                self.add_error("driver", str(error))
         if cleaned.get("port") is None:
             cleaned["port"] = 80 if cleaned.get("driver") == "netgear_gs108tv2" else 22
         if cleaned.get("driver") == "juniper_ex" and cleaned.get("credential") and not cleaned["credential"].username:
@@ -109,6 +127,22 @@ class SwitchForm(forms.ModelForm):
         if cleaned.get("snmp_timeout") is None:
             cleaned["snmp_timeout"] = 2
         return cleaned
+
+    def save(self, commit=True):
+        device = super().save(commit=False)
+        if self.original_identity != (device.address, device.port, device.driver):
+            device.https_pending = {}
+            # Keep HTTPS verification strict when changing endpoints; do not
+            # silently downgrade a previously HTTPS-managed device.
+            device.tls_fingerprint = ""
+        if device.driver != "netgear_gs108tv2":
+            device.management_protocol = "http"
+            device.https_pending = {}
+            device.tls_fingerprint = ""
+        if commit:
+            device.save()
+            self.save_m2m()
+        return device
 
 
 class ChangeForm(forms.Form):
@@ -377,14 +411,17 @@ class DiagnosticForm(forms.Form):
 
 class DiscoveryForm(forms.Form):
     network = forms.CharField(max_length=50, help_text="Any IPv4 or IPv6 CIDR, at most 256 addresses. Requires the network scanning permission.")
-    driver = forms.ChoiceField()
+    driver = forms.ChoiceField(initial="auto", label="Switch profile")
     port = forms.IntegerField(required=False, min_value=1, max_value=65535, label="Management port",
                               help_text="Blank uses SSH 22 or NETGEAR HTTP 80. NETGEAR sends passwords over unencrypted HTTP.")
     credential = forms.ModelChoiceField(queryset=Credential.objects.defer("password"), required=False)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["driver"].choices = [(slug, slug) for slug in settings.SWITCH_DRIVERS]
+        from .profiles import choices
+        profile_field = self.fields["driver"]
+        if isinstance(profile_field, forms.ChoiceField):
+            profile_field.choices = choices()
         self.fields["credential"].help_text = "Optional. Leave credentials blank for an unauthenticated candidate scan."
         self.fields["credential"].widget.attrs["data-live-url"] = "/ws/live/credential-options/"
 

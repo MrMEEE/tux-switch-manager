@@ -80,10 +80,14 @@ def _get_driver(device, settings):
         timeout = getattr(settings, "SWITCH_TIMEOUT", 15)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
             raise DriverError("Invalid switch timeout.")
+        options = {}
+        if registered.transport == "http":
+            options = {"protocol": getattr(device, "management_protocol", "http"),
+                       "tls_fingerprint": getattr(device, "tls_fingerprint", "")}
         return registered(
             host=host, port=port, username=username,
             known_hosts=getattr(settings, "SWITCH_KNOWN_HOSTS", None),
-            timeout=timeout, **{"password": password},
+            timeout=timeout, **{"password": password}, **options,
         )
     except DriverError:
         raise

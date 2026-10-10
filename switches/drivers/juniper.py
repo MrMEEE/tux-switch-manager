@@ -71,6 +71,12 @@ class JuniperEXDriver(BaseDriver):
     actual device support. Firewall builders create filters, not attachments.
     """
 
+    profile_label = "Juniper EX3300-24P / EX3300-48P (NETCONF)"
+    configuration_sections = frozenset({
+        "ports", "vlans", "lags", "system", "routing", "services", "firewall", "aggregation", "lldp_settings",
+    })
+    configuration_add_sections = frozenset({"vlans", "lags", "routing", "services", "firewall"})
+    combined_changes = True
     capabilities = frozenset({
         "get_facts", "get_config", "snapshot", "monitor", "run_command",
         "diagnostic", "preview", "apply", "restore", "build_change",

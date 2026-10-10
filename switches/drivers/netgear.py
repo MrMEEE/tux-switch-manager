@@ -13,6 +13,8 @@ from urllib.request import HTTPRedirectHandler, HTTPCookieProcessor, ProxyHandle
 
 from .base import BaseDriver, ConfigConflict, DriverError
 from .validation import address
+from .https_transport import PinnedHTTPSHandler, tls_context
+from urllib.request import HTTPSHandler
 
 logger = logging.getLogger(__name__)
 SLUG = "netgear_gs108tv2"
@@ -23,7 +25,7 @@ MEMBERSHIP = "/switching/dot1q/vlan_port_cfg.html"
 MAX_PAGE = 1024 * 1024
 MAX_VLANS = 128
 WARNING = (
-    "Legacy NETGEAR HTTP: credentials and configuration travel unencrypted. "
+    "Legacy NETGEAR web adapter. HTTP credentials and configuration travel unencrypted; prefer HTTPS. "
     "Writes are immediate, sequential and non-atomic; there is no remote lock or rollback. "
     "Only the managed fields are compared. Startup persistence is not verified; "
     "use Save Configuration in the switch GUI after checking the result."
@@ -74,6 +76,8 @@ class Page(HTMLParser):
             self.cell = []
         elif tag == "input":
             name = values.get("name")
+            if name and (values.get("type") or "").lower() == "radio" and "checked" in values:
+                self.fields[name] = values.get("value") or ""
             if name and (values.get("type") or "text").lower() not in {"checkbox", "radio", "submit", "button"}:
                 value = values.get("value") or ""
                 self.fields[name] = value
@@ -192,12 +196,15 @@ def operations(lines):
 
 
 class NetgearGS108Tv2Driver(BaseDriver):
+    profile_label = "NETGEAR GS108Tv2 (legacy web GUI)"
+    configuration_sections = frozenset({"ports", "vlans", "system"})
     transport = "http"
     requires_username = False
-    capabilities = frozenset({"get_facts", "get_config", "snapshot", "monitor", "preview", "apply"})
+    capabilities = frozenset({"get_facts", "get_config", "snapshot", "monitor", "preview", "apply", "https_enable", "https_use"})
     monitor_sections = frozenset({"system", "interfaces", "vlans"})
 
-    def __init__(self, host, port=80, username="", password="", known_hosts=None, timeout=15):
+    def __init__(self, host, port=80, username="", password="", known_hosts=None, timeout=15,
+                 protocol="http", tls_fingerprint=""):
         self.host = address(host)
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             raise DriverError("Invalid HTTP port.")
@@ -205,10 +212,16 @@ class NetgearGS108Tv2Driver(BaseDriver):
         if not password:
             raise DriverError("NETGEAR password is required.")
         authority = f"[{self.host}]" if ":" in self.host else self.host
-        self.origin = f"http://{authority}:{port}"
+        if protocol not in {"http", "https"}:
+            raise DriverError("Invalid web management protocol.")
+        if tls_fingerprint and (not isinstance(tls_fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", tls_fingerprint)):
+            raise DriverError("Invalid HTTPS certificate fingerprint.")
+        self.protocol = protocol
+        self.origin = f"{protocol}://{authority}:{port}"
         self.password, self.timeout = password, timeout
         self.cookies = CookieJar()
-        self.client = build_opener(ProxyHandler({}), HTTPCookieProcessor(self.cookies), NoRedirect())
+        secure = PinnedHTTPSHandler(tls_fingerprint) if tls_fingerprint else HTTPSHandler(context=tls_context())
+        self.client = build_opener(ProxyHandler({}), HTTPCookieProcessor(self.cookies), NoRedirect(), secure)
         self.connected = False
         self.state = None
         self.facts = {}
@@ -220,6 +233,7 @@ class NetgearGS108Tv2Driver(BaseDriver):
             "/", "/base/main_login.html", "/base/status.html", SYSTEM, PORTS, VLANS, MEMBERSHIP,
             "/base/system/management/sysInfo_rw.html", "/base/system/port/port_cfg_rw.html",
             "/switching/dot1q/vlan_port_cfg_rw.html",
+            "/base/system/https_cfg.html", "/base/system/https_cfg_rw.html",
         }
         if path not in allowed or (not self.connected and not login):
             raise DriverError("NETGEAR request is not allowed.")
@@ -243,6 +257,31 @@ class NetgearGS108Tv2Driver(BaseDriver):
         if page.fields.get("err_flag", "0") != "0":
             raise DriverError("NETGEAR rejected the form. Check the switch GUI; no further writes were sent.")
         return page
+
+    def enable_https(self):
+        if self.protocol != "http":
+            raise DriverError("This switch already uses HTTPS.")
+        page = self._page("/base/system/https_cfg.html").require(
+            "https_mode", "ssl_version", "tls_version", "https_port", "https_soft", "https_hard", "https_sessions")
+        port = page.fields["https_port"]
+        if not port.isdigit() or not 1 <= int(port) <= 65535:
+            raise DriverError("The configured HTTPS port is invalid.")
+        if page.fields["https_mode"] not in {"Enable", "Disable"}:
+            raise DriverError("HTTPS settings were not recognized.")
+        if page.fields["https_mode"] == "Disable":
+            payload = dict(page.fields)
+            payload.update(https_mode="Enable", ssl_version="Disable", tls_version="Enable",
+                           submt="16", cncel="", err_flag="0", err_msg="")
+            try:
+                self._page("/base/system/https_cfg_rw.html", payload)
+                result = self._page("/base/system/https_cfg.html").require("https_mode")
+                if result.fields["https_mode"] != "Enable":
+                    raise DriverError("HTTPS enable readback failed.")
+            except DriverError:
+                raise DriverError(
+                    "HTTPS enable outcome is uncertain. HTTP remains configured in the app. Inspect the device GUI before retrying."
+                ) from None
+        return int(port)
 
     def __enter__(self):
         self._page("/base/main_login.html", {"pwd": self.password, "err_flag": "0", "err_msg": ""}, login=True)

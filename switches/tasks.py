@@ -13,6 +13,7 @@ from .permissions import can_access
 from .discovery import probe_candidate
 from .drivers.base import DriverError
 from .drivers.netgear import PartialApply
+from .profiles import annotate, resolve
 from .services import ACTION_ROLES, action_role, notify_live, notify_switch, publish_job, record_revision, validate_network
 
 logger = logging.getLogger(__name__)
@@ -73,7 +74,10 @@ def execute_job(job_id):
         if token is None:
             raise ValueError("Switch is busy. Wait for the running job and retry.")
         with get_driver(switch) as driver:
-            if job.action == "sync" and token is not None:
+            if job.action in {"https_enable", "https_use"}:
+                from .https_setup import execute_https
+                output = execute_https(switch, driver, job)
+            elif job.action == "sync" and token is not None:
                 output = synchronize(switch, driver)
             elif job.action == "monitor":
                 output = driver.monitor(job.payload["section"])
@@ -86,8 +90,8 @@ def execute_job(job_id):
                     output = driver.diagnostic(job.action, job.payload.get("target", ""))
             elif job.action in ("preview", "apply"):
                 ids = job.payload.get("change_ids", [job.payload.get("change_id")])
-                if switch.driver == "netgear_gs108tv2" and len(ids) != 1:
-                    raise DriverError("NETGEAR has no combined transaction. Commit one staged item at a time.")
+                if not driver.combined_changes and len(ids) != 1:
+                    raise DriverError("This profile has no combined transaction. Commit one staged item at a time.")
                 changes = list(ConfigChange.objects.filter(pk__in=ids, switch=switch).order_by("pk"))
                 if not changes or len(changes) != len(ids) or any(item.status != f"{job.action}ing" for item in changes):
                     raise ValueError("Change is no longer available.")
@@ -183,7 +187,7 @@ def discover_switches(run_id):
                     continue
                 candidate = probe_candidate(str(address), run.port)
                 if candidate:
-                    results.append(candidate)
+                    results.append(annotate(candidate))
                 DiscoveryRun.objects.filter(pk=run.pk).update(results=results, scanned=scanned)
                 notify_live("discovery")
                 continue
@@ -193,8 +197,21 @@ def discover_switches(run_id):
                 DiscoveryRun.objects.filter(pk=run.pk).update(scanned=scanned)
                 notify_live("discovery")
                 continue
+            slug, port = run.driver, run.port
+            if slug == "auto":
+                candidate = probe_candidate(str(address), run.port)
+                if not candidate:
+                    DiscoveryRun.objects.filter(pk=run.pk).update(scanned=scanned)
+                    continue
+                candidate = annotate(candidate)
+                if not candidate["profile"]:
+                    results.append(candidate)
+                    DiscoveryRun.objects.filter(pk=run.pk).update(results=results, scanned=scanned)
+                    notify_live("discovery")
+                    continue
+                slug, port = resolve(candidate)
             device = SimpleNamespace(
-                address=str(address), driver=run.driver, port=run.port, username=run.username,
+                address=str(address), driver=slug, port=port, username=run.username,
                 credential_env=run.credential_env, model="",
                 credential=run.credential,
             )
@@ -208,7 +225,7 @@ def discover_switches(run_id):
                         defaults={
                             "name": str(facts.get("hostname", address))[:100],
                             "model": str(facts.get("model", ""))[:100],
-                            "driver": run.driver, "port": run.port, "username": run.username,
+                            "driver": slug, "port": port, "username": run.username,
                             "credential_env": run.credential_env,
                             "credential": run.credential,
                         },
@@ -218,7 +235,8 @@ def discover_switches(run_id):
                         from .models import SwitchAccess
 
                         SwitchAccess.objects.create(switch=switch, user=run.created_by, role="admin")
-                results.append({"address": str(address), "switch_id": switch.pk, "status": "found"})
+                results.append({"address": str(address), "switch_id": switch.pk, "status": "found",
+                                "profile": slug, "verified": True})
             except DriverError as error:
                 logger.warning("Discovery verification failed for run %s: %s", run.pk, error)
                 results.append({

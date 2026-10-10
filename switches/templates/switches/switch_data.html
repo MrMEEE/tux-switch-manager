@@ -1,4 +1,13 @@
 <section class="panel"><h2>{{ switch.name }}</h2><p class="mono">{{ switch.address }}:{{ switch.port }} · {{ switch.model }}</p><p><span class="badge">{{ switch.status }}</span> · Last sync: {{ switch.last_synced|date:"M j, H:i"|default:"Never" }}</p><p class="muted">Automatic monitoring: {{ switch.monitoring_enabled|yesno:"Enabled,Disabled" }}</p>{% if switch.notes %}<p>{{ switch.notes|linebreaksbr }}</p>{% endif %}</section>
+{% include 'switches/workspace_actions.html' %}
+{% if web_driver %}
+<section class="panel"><h2>Web management transport: {{ switch.management_protocol|upper }}</h2>
+{% if https_offer %}<details open data-live-key="https-prompt"><summary>Enable HTTPS and use it instead?</summary><p class="notice">This connection sends the switch password over unencrypted HTTP. HTTPS setup is a device configuration write, not a staged edit. SSLv3 will be disabled when enabling HTTPS; the client requires TLS 1.2 or newer and will not downgrade. Older firmware may need upgrading.</p>
+{% if device_admin %}<form method="post" action="{% url 'switch-https' switch.pk %}" data-confirm="Enable HTTPS on this switch, inspect its certificate, and prepare to switch to HTTPS? This changes device settings.">{% csrf_token %}<input type="hidden" name="action" value="https_enable"><input type="hidden" name="confirm" value="yes"><button>Enable / inspect HTTPS</button><button type="button" class="quiet" data-https-dismiss>Keep HTTP for now</button></form>{% else %}<p class="muted">A device administrator can enable HTTPS.</p>{% endif %}</details>
+{% else %}<p class="muted">HTTPS is enabled with certificate verification. No automatic HTTP fallback.</p>{% endif %}
+{% if https_pending %}<h3>Approve HTTPS certificate before switching</h3><p>Verify this SHA-256 fingerprint independently using the switch GUI/certificate download or a trusted administrator.</p><p class="mono">{{ https_pending.fingerprint }}</p><p>TLS: {{ https_pending.tls }} · Port: {{ https_pending.port }}</p>
+<form method="post" action="{% url 'switch-https' switch.pk %}" data-confirm="Trust this exact certificate and switch to HTTPS? Verify the fingerprint independently first.">{% csrf_token %}<input type="hidden" name="action" value="https_use"><input type="hidden" name="confirm" value="yes"><input type="hidden" name="fingerprint" value="{{ https_pending.fingerprint }}"><button>Trust certificate and use HTTPS</button></form>{% endif %}
+</section>{% endif %}
 <div data-configuration-workspace>
   {% include 'switches/configuration_data.html' %}
   {% include 'switches/live.html' %}

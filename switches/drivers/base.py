@@ -45,6 +45,10 @@ class BaseDriver:
     monitor_sections = frozenset()
     transport = "ssh"
     requires_username = True
+    profile_label = ""
+    configuration_sections = frozenset()
+    configuration_add_sections = frozenset()
+    combined_changes = False
 
     def supports(self, capability):
         return capability in self.capabilities

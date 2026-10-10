@@ -16,6 +16,7 @@ urlpatterns = [
     path("switches/<int:pk>/delete/", views.delete_inventory, name="switch-delete"),
     path("switches/<int:pk>/status/", views.status, name="switch-status"),
     path("switches/<int:pk>/action/", views.action, name="switch-action"),
+    path("switches/<int:pk>/https/", views.https_setup, name="switch-https"),
     path("switches/<int:pk>/stage/", views.stage, name="switch-stage"),
     path("switches/<int:pk>/changes/<int:change_id>/", views.change_action, name="change-action"),
     path("switches/<int:pk>/pending/", views.pending_action, name="pending-action"),

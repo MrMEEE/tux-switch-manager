@@ -17,6 +17,7 @@ ACTION_ROLES = {
     "sync": "viewer", "monitor": "viewer", "command": "operator",
     "ping": "viewer", "traceroute": "viewer", "reboot": "admin",
     "preview": "operator", "apply": "operator", "restore": "operator",
+    "https_enable": "admin", "https_use": "admin",
 }
 PUBLIC_MONITOR_SECTIONS = frozenset({
     "system", "uptime", "chassis", "chassis_env", "chassis_fpc", "health",
@@ -93,8 +94,8 @@ def queue_job(switch, action, payload, user):
                 raise DriverError("This driver does not support that operation.")
             if action == "monitor" and payload.get("section") not in registered.monitor_sections:
                 raise DriverError("This driver does not support that monitoring section.")
-            if switch.driver == "netgear_gs108tv2" and len(payload.get("change_ids", [])) > 1:
-                raise DriverError("NETGEAR combined commits are unavailable. Preview and commit one staged item at a time.")
+            if not registered.combined_changes and len(payload.get("change_ids", [])) > 1:
+                raise DriverError("This profile has no combined transaction. Preview and commit one staged item at a time.")
         except DriverError as error:
             raise ValueError(str(error)) from None
         job = Job.objects.create(switch=switch, action=action, payload=payload, created_by=user)
@@ -111,8 +112,9 @@ def queue_pending_changes(switch, action, user):
         device = Switch.objects.select_for_update().get(pk=switch.pk)
         if not can_access(user, device, "operator"):
             raise ValueError("You do not have permission for this operation.")
-        if device.driver == "netgear_gs108tv2":
-            raise ValueError("NETGEAR has no atomic commit-all. Preview and commit one staged item at a time.")
+        from .drivers.registry import driver_class
+        if not driver_class(device.driver).combined_changes:
+            raise ValueError("This profile has no atomic commit-all. Preview and commit one staged item at a time.")
         changes = list(device.changes.select_for_update().filter(status="pending").order_by("pk"))
         if not changes:
             raise ValueError("There are no pending changes.")
@@ -218,7 +220,7 @@ def queue_discovery(network, driver, port, username, credential_env, user, crede
     if not user.is_active or not user.has_perm("switches.discover_switches"):
         raise ValueError("You do not have permission to discover switches.")
     subnet = validate_network(network)
-    if driver not in settings.SWITCH_DRIVERS:
+    if driver != "auto" and driver not in settings.SWITCH_DRIVERS:
         raise ValueError("Select a registered driver.")
     if not credential and bool(username) != bool(credential_env):
         raise ValueError("Supply both username and credential reference, or neither.")

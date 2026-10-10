@@ -4,11 +4,13 @@
 <div class="stack">
 {% for result in run.results %}
 <div class="candidate-card" data-live-key="candidate-{{ run.pk }}-{{ result.address }}"><div class="section-header"><div><h4>{{ result.address }}</h4>{% if result.error %}<p class="notice error" role="alert">{{ result.error }}</p>{% endif %}</div><span class="badge">{{ result.status }}</span></div>
+<p class="notice">{{ result.support }}{% if result.profile_label %} · {{ result.profile_label }}{% endif %}</p>
 {% if result.status == "candidate" %}
 <p class="muted">{{ result.vendor }} · {{ result.confidence }}</p><ul>{% for evidence in result.evidence %}<li>{{ evidence }}</li>{% endfor %}</ul>
 <form method="post" action="{% url 'candidate-confirm' run.pk %}" data-verify-candidate>{% csrf_token %}<input type="hidden" name="address" value="{{ result.address }}">
 <div class="form-grid"><div class="form-field"><label>Credential<select name="credential" required><option value="">Select a credential</option>{% for credential in credentials %}<option value="{{ credential.pk }}">{{ credential }}</option>{% endfor %}</select></label></div>
-<div class="form-field"><label>Management port<input type="number" name="port" value="{{ run.port }}" min="1" max="65535" required></label>{% if run.driver == 'netgear_gs108tv2' %}<p class="notice">NETGEAR HTTP sends the selected password unencrypted. Use a trusted management network.</p>{% endif %}</div></div>
+<div class="form-field"><label>Profile<select name="driver">{% for value,label in profile_choices %}<option value="{{ value }}"{% if value == run.driver %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label></div>
+<div class="form-field"><label>Management port<input type="number" name="port" value="{{ result.enrollment_port|default:run.port }}" min="1" max="65535" required></label>{% if run.driver == 'netgear_gs108tv2' or result.profile == 'netgear_gs108tv2' %}<p class="notice">NETGEAR HTTP sends the selected password unencrypted. After adding, the app offers to enable and switch to HTTPS.</p>{% endif %}</div></div>
 <div class="form-actions"><button>Verify and add</button><p class="verification-status muted" role="status" aria-live="polite"></p></div></form>
 {% elif result.switch_id %}<a class="button quiet" href="{% url 'switch-detail' result.switch_id %}">Open switch</a>{% endif %}
 </div>

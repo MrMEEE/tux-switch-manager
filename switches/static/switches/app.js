@@ -34,6 +34,11 @@
   }
   initializeConfiguration(document);
   document.addEventListener("click", (event) => {
+    const dismiss = event.target.closest("[data-https-dismiss]");
+    if (dismiss) {
+      dismiss.closest("details").open = false;
+      return;
+    }
     const tab = event.target.closest("[data-configuration-tab]");
     if (!tab) return;
     selectConfiguration(tab.closest("[data-configuration-workspace]"), tab.dataset.configurationTab);

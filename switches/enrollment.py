@@ -18,10 +18,15 @@ from .services import record_revision
 TRUST_SALT = "switches.candidate-host-key"
 
 
-def verify_candidate(run, address, credential, port, user, session_key, trust_token=""):
+def verify_candidate(run, address, credential, port, user, session_key, trust_token="", profile=None):
+    candidate = next((item for item in run.results if item.get("address") == address), {})
+    if profile is None:
+        from .profiles import resolve
+        profile = resolve(candidate)[0] if run.driver == "auto" else run.driver
     binding = {
         "run": run.pk, "address": address, "credential": credential.pk,
         "port": port, "user": user.pk, "session": hashlib.sha256((session_key or "").encode()).hexdigest(),
+        "driver": profile,
     }
     approved = None
     if trust_token:
@@ -32,7 +37,7 @@ def verify_candidate(run, address, credential, port, user, session_key, trust_to
         if any(approved.get(key) != value for key, value in binding.items()):
             raise DriverError("Host-key approval does not match this verification request.")
     device = SimpleNamespace(
-        address=address, port=port, driver=run.driver, credential=credential,
+        address=address, port=port, driver=profile, credential=credential,
         username="", credential_env="", model="",
     )
     original_login = (credential.username, credential.password)
@@ -79,7 +84,7 @@ def verify_candidate(run, address, credential, port, user, session_key, trust_to
             address=address,
             defaults={
                 "name": str(facts.get("hostname", address))[:100],
-                "model": str(facts.get("model", ""))[:100], "driver": run.driver,
+                "model": str(facts.get("model", ""))[:100], "driver": profile,
                 "port": port, "credential": credential,
             },
         )

@@ -52,6 +52,7 @@ def classify_candidate(address, open_ports, banners):
         "vendor": vendor or "Unknown (SSH on NETCONF port)",
         "confidence": "vendor service fingerprint" if vendor else "possible NETCONF device",
         "evidence": evidence,
+        "fingerprint": " ".join(banners.values())[:4096],
     }
 
 

@@ -43,7 +43,7 @@ driver targets Juniper EX3300-24P and EX3300-48P, including older non-ELS Junos.
 
 ## Web-only NETGEAR GS108Tv2
 
-Choose **Netgear Gs108Tv2** (`netgear_gs108tv2`) in inventory or discovery and
+Choose **NETGEAR GS108Tv2 (legacy web GUI)** (`netgear_gs108tv2`) in inventory or discovery and
 use management port **80** (blank uses the driver default). Create a saved
 credential with the switch password; its username may be blank and is ignored
 by this driver. Verify and Add authenticates directly without rescanning or
@@ -61,8 +61,25 @@ Unrecognized model/page layouts fail closed instead of guessing.
 **Safety differences from Junos:**
 
 - HTTP sends passwords and configuration unencrypted. Use an isolated, trusted
-  management network. The adapter disables proxy use, refuses redirects and
-  keeps session cookies in memory, never in a shared file or logs.
+  management network. The device workspace offers device administrators
+  **Enable / inspect HTTPS**. This explicitly confirmed, asynchronous operation
+  enables the device HTTPS service (disabling SSLv3 when enabling it), preserving
+  its configured port and timeouts. It does not disable HTTP or save startup
+  configuration. If HTTPS is already enabled, it only inspects the endpoint.
+- Before using HTTPS, the client requires TLS 1.2 or newer and displays the
+  certificate SHA-256 fingerprint for independent verification. Choose **Trust
+  certificate and use HTTPS** to approve that exact certificate. The app
+  authenticates and reads back over pinned HTTPS before changing its saved
+  protocol/port. Pin mismatch blocks sending any credentials. No silent HTTP
+  fallback, obsolete TLS, weak-cipher opt-in or blanket certificate bypass is
+  provided. Firmware that only supports TLS 1.0 needs upgrading; the job explains
+  that HTTPS may have been enabled but the app transport remains unchanged.
+- HTTPS setup requires device-admin permission and rechecks it at job execution.
+  Certificate approval is bound to the device address, port and inspected
+  certificate, and is rechecked before use. Changing inventory endpoints clears
+  the old approval/pin rather than reusing another device's trust.
+- The adapter disables proxy use, refuses redirects and keeps session cookies in
+  memory, never in a shared file or logs.
 - Revisions contain only managed fields, not a full restorable configuration.
   Preview is a local planned diff, not a device candidate or commit-check.
 - Writes take effect immediately, without a remote lock, atomic transaction or
@@ -82,6 +99,34 @@ Unrecognized model/page layouts fail closed instead of guessing.
 No additional dependency is needed. PyNetgearSwitchController was evaluated as
 a reference, but its GS108Ev3/GS105Ev2 CGI endpoints and authentication do not
 match this GS108Tv2 legacy interface; its code is not incorporated.
+
+## Automatic profiles and supported features
+
+Discovery and manual inventory creation default to **Automatic matching**.
+Public service fingerprints recommend a registered driver and transport port:
+the legacy GS108T web page selects the GS108Tv2 adapter, and Junos/Juniper
+evidence selects the EX3300 NETCONF adapter (preferring port 830 when detected).
+An explicit profile and custom port remain available. Manual matching probes
+only the entered address, not a network; the existing inventory permission is
+required. Discovery still requires the scanning permission.
+
+Vendor evidence is not model verification. Discovery shows one of:
+**supported profile / model verification pending**, **possible supported profile**,
+**no matching supported profile**, or **supported / model verified** after
+authenticated enrollment. Known incompatible models and NETGEAR OUI-only matches
+are not automatically assigned the GS108Tv2 adapter. Unknown devices stay visible
+but do not receive credentials in automatic authenticated discovery. Verify and
+Add uses the selected/matched profile directly, without a new discovery run;
+Juniper model validation and SSH key approval are unchanged. Manual inventory
+records are verified when synchronized.
+
+Drivers declare configuration sections, creatable sections, monitoring choices
+and operation capabilities. The workspace only shows those supported by the
+selected profile, and the server rejects forged requests for unsupported
+operations. For example, the GS108Tv2 adapter shows Ports, VLAN membership and
+System, not LAG/aggregation provisioning, routing or firewall editors. These are
+adapter capabilities, not a claim that the physical device lacks every hidden
+feature.
 
 ## Run locally
 

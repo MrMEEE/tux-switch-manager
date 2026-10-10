@@ -4,17 +4,5 @@
 <a class="back" href="{% url 'dashboard' %}">← Fleet</a>
 <div class="heading"><div><p class="eyebrow">DEVICE WORKSPACE</p><h1 data-live-text="name">{{ switch.name }}</h1><p class="muted mono" data-live-text="identity">{{ switch.address }} · {{ switch.driver }} · {{ switch.model }}</p></div><div class="actions">{% if device_admin and perms.switches.manage_inventory %}<a class="button quiet" href="{% url 'switch-edit' switch.pk %}">Edit inventory</a>{% endif %}<form method="post" action="{% url 'switch-action' switch.pk %}">{% csrf_token %}<input type="hidden" name="action" value="sync"><button>Sync now</button></form></div></div>
 <p id="connection" class="muted" aria-live="polite">Live updates connecting…</p>
-<details class="panel"><summary>Monitoring and diagnostics</summary>
-  <p class="muted">Run an operational check; results appear in job history. Configuration monitoring and manual show commands require operator access.</p>
-  <div class="monitor-grid">{% for value,label in sections %}<form method="post" action="{% url 'switch-action' switch.pk %}">{% csrf_token %}<input type="hidden" name="action" value="monitor"><input type="hidden" name="section" value="{{ value }}"><button class="quiet">{{ label }}</button></form>{% endfor %}</div>
-  {% if supports_diagnostics %}<form method="post" action="{% url 'switch-action' switch.pk %}">{% csrf_token %}{% include 'switches/form_fields.html' with form=diagnostic_form %}<div class="form-actions"><button>Run diagnostic</button></div></form>{% endif %}
-</details>
 <div id="live-detail" data-live-url="/ws/live/switch/{{ switch.pk }}/">{% include 'switches/switch_data.html' %}</div>
-{% if operator and supports_cli %}
-<details class="panel" id="configuration-advanced"><summary>Advanced · manual configuration</summary>
-  <p class="muted">For settings not supported by the graphical editor. Prefer the current-configuration editor above. Manual commands are staged against the latest synchronized baseline.</p>
-  <form method="post" action="{% url 'switch-stage' switch.pk %}">{% csrf_token %}{% include 'switches/form_fields.html' with form=change_form %}<div class="form-actions"><button>Stage commands</button></div></form>
-</details>
-{% endif %}
-{% if device_admin %}<section class="panel danger-zone"><h2>Device administration</h2>{% if supports_diagnostics %}<p>Reboot interrupts traffic. Verify your maintenance window before proceeding.</p><form method="post" action="{% url 'switch-action' switch.pk %}" data-confirm="Reboot this switch? This will interrupt traffic.">{% csrf_token %}<input type="hidden" name="action" value="reboot"><button class="danger">Reboot switch</button></form>{% endif %}{% if perms.switches.manage_inventory %}<hr><h3>Delete inventory</h3><p class="muted">This removes the inventory record and stored history, not the physical switch configuration. Queued or running jobs must finish first.</p><form method="post" action="{% url 'switch-delete' switch.pk %}" data-confirm="Permanently delete this device and all stored history? This cannot be undone.">{% csrf_token %}{{ delete_form.as_p }}<button class="danger">Delete device permanently</button></form>{% endif %}</section>{% endif %}
 {% endblock %}

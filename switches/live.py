@@ -17,12 +17,13 @@ def snapshot(request, topic, pk=None):
         template = "switches/fleet_data.html"
         context = {"switches": visible_switches(user).defer("snapshot", "credential_env", "username")}
     elif topic == "discovery":
+        from .profiles import choices, discovery_runs
         if not user.has_perm("switches.discover_switches"):
             raise PermissionDenied
         runs = DiscoveryRun.objects.all() if user.is_superuser else DiscoveryRun.objects.filter(created_by=user)
         template = "switches/discovery_history.html"
         context = {
-            "runs": runs.order_by("-created_at", "-pk")[:20],
+            "runs": discovery_runs(list(runs.order_by("-created_at", "-pk")[:20])), "profile_choices": choices(),
             "credentials": Credential.objects.defer("password"),
         }
     elif topic == "credentials":

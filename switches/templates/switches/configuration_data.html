@@ -13,7 +13,7 @@
   {% for section in configuration_sections %}
   <section class="configuration-section" id="configure-{{ section.slug }}" role="tabpanel" aria-labelledby="tab-{{ section.slug }}" data-configuration-panel>
     <h3>{{ section.label }} <span class="badge">{{ section.rows|length }}</span></h3>
-    {% if not web_driver and section.slug != 'ports' and section.slug != 'system' and section.slug != 'aggregation' and section.slug != 'lldp_settings' %}
+    {% if section.can_add %}
     <div class="form-actions">
       {% if section.slug == 'services' %}
       <a class="button quiet" href="{% url 'configuration-editor' switch.pk section.slug %}?kind=ntp">Add NTP server</a>
