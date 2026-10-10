@@ -1,0 +1,402 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+cd -- "$ROOT_DIR"
+CONFIG_FILE="${TUX_SWITCH_CONFIG:-$ROOT_DIR/config/config.conf}"
+
+if [[ -f "$CONFIG_FILE" ]]; then
+    if [[ -n "$(find "$CONFIG_FILE" -perm /022)" ]]; then
+        echo "Refusing to load $CONFIG_FILE: it is writable by group or others." >&2
+        exit 1
+    fi
+    if [[ -n "$(find "$CONFIG_FILE" -perm /044)" ]]; then
+        echo "Warning: $CONFIG_FILE contains secrets but is readable by others; run chmod 600 on it." >&2
+    fi
+    set -a
+    # shellcheck source=/dev/null
+    . "$CONFIG_FILE"
+    set +a
+elif [[ -n "${TUX_SWITCH_CONFIG:-}" ]]; then
+    echo "Configuration file $CONFIG_FILE was not found." >&2
+    exit 1
+fi
+
+PID_DIR="$ROOT_DIR/.run"
+LOG_DIR="$ROOT_DIR/logs"
+VENV_DIR="$ROOT_DIR/.venv"
+REQUIREMENTS="$ROOT_DIR/requirements.txt"
+BASE_PYTHON="${TUX_SWITCH_PYTHON:-python3}"
+PYTHON="$VENV_DIR/bin/python"
+CELERY="$VENV_DIR/bin/celery"
+REDIS_DATA_DIR="$ROOT_DIR/.redis"
+export REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
+HOST="${TUX_SWITCH_BIND_HOST:-127.0.0.1}"
+PORT="${TUX_SWITCH_PORT:-8000}"
+STOP_TIMEOUT=30
+STARTED_SERVICES=()
+
+usage() {
+    echo "Usage: $0 {start|stop|restart|status}"
+    echo "       $0 manage <Django command> [arguments...]"
+}
+
+pid_file() {
+    printf '%s/%s.pid' "$PID_DIR" "$1"
+}
+
+log_file() {
+    printf '%s/%s.log' "$LOG_DIR" "$1"
+}
+
+requirements_satisfied() {
+    "$PYTHON" - "$REQUIREMENTS" <<'PY'
+import re
+import sys
+from importlib import metadata
+
+with open(sys.argv[1], encoding="utf-8") as requirements:
+    for line in requirements:
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        match = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;]+)", line)
+        if not match:
+            sys.exit(1)
+        try:
+            if metadata.version(match.group(1)) != match.group(2):
+                sys.exit(1)
+        except metadata.PackageNotFoundError:
+            sys.exit(1)
+PY
+}
+
+ensure_venv() {
+    if [[ ! -e "$VENV_DIR" ]]; then
+        command -v "$BASE_PYTHON" >/dev/null || {
+            echo "Python interpreter '$BASE_PYTHON' was not found. Set TUX_SWITCH_PYTHON." >&2
+            return 1
+        }
+        "$BASE_PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 12))' || {
+            echo "Python 3.12 or newer is required to create .venv." >&2
+            return 1
+        }
+        echo "Creating virtual environment in $VENV_DIR..."
+        "$BASE_PYTHON" -m venv "$VENV_DIR"
+    fi
+
+    [[ -x "$PYTHON" ]] || {
+        echo "$VENV_DIR exists but does not contain a usable Python interpreter." >&2
+        return 1
+    }
+    if ! requirements_satisfied; then
+        echo "Installing missing or outdated Python requirements..."
+        "$PYTHON" -m pip install -r "$REQUIREMENTS"
+    fi
+    [[ -x "$CELERY" ]] || {
+        echo "Celery is not available in $VENV_DIR after installing requirements." >&2
+        return 1
+    }
+}
+
+process_matches() {
+    local name="$1" pid="$2" command cwd
+
+    [[ -r "/proc/$pid/cmdline" ]] || return 1
+    cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+    if [[ "$name" == redis ]]; then
+        command="$(tr '\0' ' ' < "/proc/$pid/cmdline")"
+        [[ "$cwd" == "$REDIS_DATA_DIR" && "$command" == *redis-server* &&
+            "$(readlink "/proc/$pid/exe" 2>/dev/null)" == "$(readlink -f "$(command -v redis-server)")" ]]
+        return
+    fi
+    [[ "$cwd" == "$ROOT_DIR" ]] || return 1
+    command="$(tr '\0' ' ' < "/proc/$pid/cmdline")"
+
+    case "$name" in
+        web) [[ "$command" == *"tux_switch.asgi:application"* ]] ;;
+        worker) [[ "$command" == *"-A tux_switch worker"* ]] ;;
+        beat) [[ "$command" == *"-A tux_switch beat"* ]] ;;
+    esac
+}
+
+redis_ready() {
+    "$PYTHON" - <<'PY'
+import os
+import sys
+from redis import Redis
+from redis.exceptions import RedisError
+
+try:
+    with Redis.from_url(os.environ["REDIS_URL"], socket_connect_timeout=1, socket_timeout=1) as client:
+        sys.exit(0 if client.ping() else 1)
+except (RedisError, ValueError):
+    sys.exit(1)
+PY
+}
+
+start_redis() {
+    local endpoint redis_host redis_port i
+    if redis_ready; then
+        echo "Redis is responding at $(redacted_redis_url)."
+        return 0
+    fi
+    endpoint="$("$PYTHON" - <<'PY'
+import os
+import sys
+from urllib.parse import urlsplit
+
+url = urlsplit(os.environ["REDIS_URL"])
+if url.scheme != "redis" or url.hostname not in ("127.0.0.1", "localhost", "::1") or url.username or url.password:
+    print("Redis is unavailable. Automatic startup only supports local redis:// URLs without credentials.", file=sys.stderr)
+    sys.exit(1)
+print("::1" if url.hostname == "::1" else "127.0.0.1", url.port or 6379)
+PY
+)" || return 1
+    read -r redis_host redis_port <<< "$endpoint"
+    command -v redis-server >/dev/null || {
+        echo "redis-server is not installed. Install Redis using your system package manager." >&2
+        return 1
+    }
+    mkdir -p -- "$REDIS_DATA_DIR"
+    chmod 700 "$REDIS_DATA_DIR"
+    start_one redis redis-server --bind "$redis_host" --port "$redis_port" \
+        --protected-mode yes --daemonize no --dir "$REDIS_DATA_DIR" \
+        --appendonly yes --appendfsync everysec || return 1
+    for ((i = 0; i < 10; i++)); do
+        if redis_ready; then
+            echo "User-space Redis is ready on $(url_host "$redis_host"):$redis_port."
+            return 0
+        fi
+        sleep 1
+    done
+    echo "Redis did not become ready. See $(log_file redis)." >&2
+    return 1
+}
+
+service_pid() {
+    local name="$1" file pid
+    file="$(pid_file "$name")"
+    [[ -f "$file" ]] || return 1
+    read -r pid < "$file"
+    [[ "$pid" =~ ^[0-9]+$ ]] || {
+        echo "Invalid PID in $file" >&2
+        return 2
+    }
+    if kill -0 "$pid" 2>/dev/null && process_matches "$name" "$pid"; then
+        printf '%s\n' "$pid"
+        return 0
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "Refusing to signal PID $pid from $file: process identity did not match." >&2
+        return 2
+    fi
+    rm -f -- "$file"
+    return 1
+}
+
+start_one() {
+    local name="$1"
+    shift
+    local file
+    file="$(pid_file "$name")"
+
+    if service_pid "$name" >/dev/null; then
+        echo "$name is already running (PID $(<"$file"))."
+        return 0
+    else
+        local result=$?
+        [[ $result -eq 1 ]] || return "$result"
+    fi
+
+    nohup "$@" >> "$(log_file "$name")" 2>&1 < /dev/null &
+    printf '%s\n' "$!" > "$file"
+    sleep 1
+
+    if process_matches "$name" "$(<"$file")"; then
+        STARTED_SERVICES+=("$name")
+        echo "Started $name (PID $(<"$file"))."
+        return 0
+    fi
+    echo "Failed to start $name. See $(log_file "$name")." >&2
+    rm -f -- "$file"
+    return 1
+}
+
+url_host() {
+    if [[ "$1" == *:* && "$1" != \[*\] ]]; then
+        printf '[%s]' "$1"
+    else
+        printf '%s' "$1"
+    fi
+}
+
+redacted_redis_url() {
+    sed -E 's#^([a-z]+://)[^@/]*@#\1***@#' <<< "${REDIS_URL:-redis://127.0.0.1:6379/0}"
+}
+
+show_endpoints() {
+    local host url origin
+    local -a origins
+    local -a hosts=()
+    case "$HOST" in
+        0.0.0.0 | :: | "[::]")
+            hosts=(localhost "$(hostname -f 2>/dev/null || hostname)")
+            echo "Web server listens on all interfaces, port $PORT ($HOST:$PORT)."
+            ;;
+        *)
+            hosts=("$HOST")
+            echo "Web server listens on $(url_host "$HOST"):$PORT."
+            ;;
+    esac
+
+    for host in "${hosts[@]}"; do
+        url="http://$(url_host "$host"):$PORT"
+        echo "  Web UI:     $url/"
+        echo "  Admin:      $url/admin/"
+    done
+    if [[ "${DJANGO_DEBUG:-0}" != "1" ]]; then
+        echo "  Note: DJANGO_DEBUG is off, so plain HTTP requests are redirected to HTTPS;"
+        echo "        serve the app through a TLS reverse proxy."
+    fi
+    IFS=',' read -r -a origins <<< "${DJANGO_CSRF_TRUSTED_ORIGINS:-}"
+    for origin in "${origins[@]}"; do
+        [[ -n "$origin" ]] && echo "  Public URL: ${origin%/}/"
+    done
+    echo "  Redis:      $(redacted_redis_url)"
+    echo "  Logs:       $LOG_DIR/{redis,web,worker,beat}.log"
+}
+
+start() {
+    local name i
+    [[ -n "${DJANGO_SECRET_KEY:-}" ]] || {
+        echo "DJANGO_SECRET_KEY is not set. Copy config/config.conf.sample to config/config.conf and fill it in." >&2
+        return 1
+    }
+    ensure_venv
+
+    echo "Applying database migrations..."
+    "$PYTHON" "$ROOT_DIR/manage.py" migrate --noinput
+
+    echo "Collecting static assets..."
+    "$PYTHON" "$ROOT_DIR/manage.py" collectstatic --noinput
+
+    mkdir -p -- "$PID_DIR" "$LOG_DIR"
+    if ! start_redis ||
+        ! start_one web "$PYTHON" -m daphne -b "$HOST" -p "$PORT" tux_switch.asgi:application ||
+        ! start_one worker "$CELERY" -A tux_switch worker --loglevel=INFO ||
+        ! start_one beat "$CELERY" -A tux_switch beat --loglevel=INFO; then
+        for ((i = ${#STARTED_SERVICES[@]} - 1; i >= 0; i--)); do
+            name="${STARTED_SERVICES[$i]}"
+            stop_one "$name" || true
+        done
+        return 1
+    fi
+    echo
+    show_endpoints
+}
+
+stop_one() {
+    local name="$1" pid result=0 i
+    if pid="$(service_pid "$name")"; then
+        echo "Stopping $name (PID $pid)..."
+        kill -TERM "$pid"
+        for ((i = 0; i < STOP_TIMEOUT; i++)); do
+            if ! kill -0 "$pid" 2>/dev/null || [[ "$(ps -o stat= -p "$pid")" == Z* ]]; then
+                rm -f -- "$(pid_file "$name")"
+                echo "Stopped $name."
+                return 0
+            fi
+            sleep 1
+        done
+        if process_matches "$name" "$pid"; then
+            echo "$name did not stop within ${STOP_TIMEOUT}s; sending SIGKILL." >&2
+            kill -KILL "$pid"
+        fi
+        rm -f -- "$(pid_file "$name")"
+        return 1
+    else
+        result=$?
+    fi
+    if [[ $result -eq 1 ]]; then
+        echo "$name is not running."
+        return 0
+    fi
+    return "$result"
+}
+
+stop() {
+    local result=0
+    stop_one beat || result=1
+    stop_one worker || result=1
+    stop_one web || result=1
+    stop_one redis || result=1
+    return "$result"
+}
+
+status() {
+    local name result=0 pid web_running=0
+    for name in web worker beat; do
+        if pid="$(service_pid "$name")"; then
+            echo "$name is running (PID $pid)."
+            [[ "$name" == web ]] && web_running=1
+        else
+            local service_result=$?
+            if [[ $service_result -eq 1 ]]; then
+                echo "$name is not running."
+                result=1
+            else
+                result=1
+            fi
+        fi
+    done
+    if pid="$(service_pid redis)"; then
+        echo "redis is running (PID $pid, user-space instance)."
+    else
+        local redis_result=$?
+        if [[ $redis_result -ne 1 ]]; then
+            result=1
+        elif [[ -x "$PYTHON" ]] && redis_ready; then
+            echo "Redis is responding (externally managed; not stopped by this script)."
+        else
+            echo "Redis is not responding."
+            result=1
+        fi
+    fi
+    if ((web_running)); then
+        echo
+        show_endpoints
+    fi
+    return "$result"
+}
+
+case "${1:-}" in
+    start) start ;;
+    stop) stop ;;
+    restart)
+        [[ -n "${DJANGO_SECRET_KEY:-}" ]] || {
+            echo "DJANGO_SECRET_KEY is not set. Copy config/config.conf.sample to config/config.conf and fill it in." >&2
+            exit 1
+        }
+        ensure_venv
+        stop && start
+        ;;
+    status) status ;;
+    manage)
+        shift
+        if [[ $# -eq 0 ]]; then
+            usage >&2
+            exit 2
+        fi
+        [[ -n "${DJANGO_SECRET_KEY:-}" ]] || {
+            echo "DJANGO_SECRET_KEY is not set. Copy config/config.conf.sample to config/config.conf and fill it in." >&2
+            exit 1
+        }
+        ensure_venv
+        exec "$PYTHON" "$ROOT_DIR/manage.py" "$@"
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

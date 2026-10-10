@@ -1,0 +1,49 @@
+{% if operator %}
+<nav class="configuration-nav" aria-label="Configuration sections" role="tablist">
+  {% for section in configuration_sections %}<button type="button" role="tab" id="tab-{{ section.slug }}" aria-controls="configure-{{ section.slug }}" aria-selected="false" data-configuration-tab="configure-{{ section.slug }}">{{ section.label }}</button>{% endfor %}
+  <button type="button" role="tab" id="tab-review" aria-controls="configuration-review" aria-selected="false" data-configuration-tab="configuration-review">Review and Commit</button>
+</nav>
+<section id="configuration" class="panel" data-configuration-current>
+  <p class="eyebrow">CONFIGURE YOUR SWITCH</p>
+  <h2>Current configuration</h2>
+  {% if web_driver %}<p class="notice">GS108Tv2 legacy HTTP adapter: system metadata, port settings and existing VLAN membership. This is a managed-field baseline, not a full configuration backup. PVID, VLAN creation/deletion, LAG configuration and other settings remain in the switch GUI. HTTP is unencrypted; writes are not atomic.</p>{% else %}<p class="muted">Select an existing item to edit its current settings, or add a new item. Changes are staged for Review and Commit. Unsupported settings remain intact and are available through Advanced.</p>{% endif %}
+  {% if configuration_error %}<div class="notice error" role="alert">{{ configuration_error }}</div>
+  {% else %}
+  <p class="muted">Synchronized baseline: revision #{{ configuration_revision.pk }} · {{ configuration_revision.created_at }}</p>
+  {% for section in configuration_sections %}
+  <section class="configuration-section" id="configure-{{ section.slug }}" role="tabpanel" aria-labelledby="tab-{{ section.slug }}" data-configuration-panel>
+    <h3>{{ section.label }} <span class="badge">{{ section.rows|length }}</span></h3>
+    {% if not web_driver and section.slug != 'ports' and section.slug != 'system' and section.slug != 'aggregation' and section.slug != 'lldp_settings' %}
+    <div class="form-actions">
+      {% if section.slug == 'services' %}
+      <a class="button quiet" href="{% url 'configuration-editor' switch.pk section.slug %}?kind=ntp">Add NTP server</a>
+      <a class="button quiet" href="{% url 'configuration-editor' switch.pk section.slug %}?kind=dns">Add DNS server</a>
+      <a class="button quiet" href="{% url 'configuration-editor' switch.pk section.slug %}?kind=snmp-community">Add SNMP community</a>
+      {% else %}<a class="button quiet" href="{% url 'configuration-editor' switch.pk section.slug %}">{% if section.slug == 'vlans' %}Add VLAN{% elif section.slug == 'lags' %}Add LAG{% elif section.slug == 'routing' %}Add route{% else %}Add firewall rule{% endif %}</a>{% endif %}
+    </div>
+    {% endif %}
+    <div class="table-scroll"><table><thead><tr><th>Item</th>
+      {% if web_driver %}<th>Current managed settings</th>
+      {% elif section.slug == 'ports' or section.slug == 'lags' %}<th>Description</th><th>Admin state</th><th>Mode</th><th>VLANs</th>{% if section.slug == 'lags' %}<th>Members</th><th>LACP</th>{% else %}<th>LAG</th>{% endif %}
+      {% elif section.slug == 'vlans' %}<th>VLAN ID</th>
+      {% elif section.slug == 'routing' %}<th>Next hop</th>
+      {% elif section.slug == 'firewall' %}<th>Source</th><th>Destination</th><th>Protocol</th><th>Port</th><th>Action</th>
+      {% else %}<th>Current settings</th>{% endif %}
+      <th>Edit</th></tr></thead><tbody>
+      {% for row in section.rows %}<tr><td class="mono">{{ row.key }}</td>
+        {% if web_driver %}<td>{{ row.summary }}{% if row.description %}<br>{{ row.description }}{% endif %}</td>
+        {% elif section.slug == 'ports' or section.slug == 'lags' %}<td>{{ row.description|default:"—" }}{% if row.mtu %}<br>MTU {{ row.mtu }}{% endif %}{% if row.speed %}<br>Speed {{ row.speed }}{% endif %}{% if row.duplex %}<br>{{ row.duplex }}{% endif %}</td><td>{{ row.admin_state }}</td><td>{{ row.mode|default:"Not configured" }}{% if row.addresses %}<br>Routed: {{ row.addresses|join:", " }}{% endif %}</td><td>{{ row.vlans|join:", "|default:"None" }}{% if row.native_vlan %}<br>Native ID {{ row.native_vlan }}{% endif %}</td>{% if section.slug == 'lags' %}<td>{{ row.members|join:", "|default:"None" }}</td><td>{{ row.lacp|default:"Disabled" }}{% if row.minimum_links %}<br>Minimum links {{ row.minimum_links }}{% endif %}</td>{% else %}<td>{{ row.lag|default:"None" }}</td>{% endif %}
+        {% elif section.slug == 'vlans' %}<td>{{ row.vlan_id|default:row.vlan_id_list }}{% if row.description %}<br>{{ row.description }}{% endif %}{% if row.aging_time %}<br>MAC aging: {{ row.aging_time }} seconds{% endif %}{% if row.filter_in %}<br>Input filter: {{ row.filter_in }}{% endif %}{% if row.filter_out %}<br>Output filter: {{ row.filter_out }}{% endif %}{% if row.l3_interface %}<br>Routed interface: {{ row.l3_interface }} {{ row.l3_addresses|join:", " }}{% endif %}</td>
+        {% elif section.slug == 'routing' %}<td>{{ row.next_hop|default:"Advanced route" }}</td>
+        {% elif section.slug == 'firewall' %}<td>{{ row.source|default:"Any" }}</td><td>{{ row.destination|default:"Any" }}</td><td>{{ row.protocol|default:"Any" }}</td><td>{{ row.port|default:"Any" }}</td><td>{{ row.action|default:"Advanced" }}</td>
+        {% else %}<td>{{ row.summary }}</td>{% endif %}
+        <td>
+        {% if row.editable %}<a class="button quiet" href="{% url 'configuration-editor' switch.pk section.slug %}?item={{ row.key|urlencode }}">Edit</a>
+        {% else %}<span class="muted">Advanced settings — use manual editor</span>{% endif %}
+      </td></tr>{% empty %}<tr><td colspan="9">No explicitly configured items. Synchronize to collect current device settings.</td></tr>{% endfor %}
+    </tbody></table></div>
+  </section>
+  {% endfor %}
+  {% endif %}
+</section>
+{% endif %}

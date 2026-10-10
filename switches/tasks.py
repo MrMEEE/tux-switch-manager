@@ -1,4 +1,5 @@
 from datetime import timedelta
+import logging
 from types import SimpleNamespace
 import uuid
 
@@ -9,7 +10,12 @@ from django.utils import timezone
 
 from .models import ConfigChange, ConfigRevision, DiscoveryRun, Job, Switch
 from .permissions import can_access
-from .services import ACTION_ROLES, action_role, notify_switch, publish_job, record_revision, validate_network
+from .discovery import probe_candidate
+from .drivers.base import DriverError
+from .drivers.netgear import PartialApply
+from .services import ACTION_ROLES, action_role, notify_live, notify_switch, publish_job, record_revision, validate_network
+
+logger = logging.getLogger(__name__)
 
 
 def get_driver(device):
@@ -51,6 +57,7 @@ def execute_job(job_id):
     if not Job.objects.filter(pk=job_id, status="queued").update(status="running", started_at=timezone.now()):
         return
     job = Job.objects.select_related("switch", "created_by").get(pk=job_id)
+    notify_live("job")
     switch = job.switch
     token = None
     change = None
@@ -73,20 +80,29 @@ def execute_job(job_id):
             elif job.action == "command":
                 output = driver.run_command(job.payload["command"])
             elif job.action in ("ping", "traceroute", "reboot"):
-                output = driver.diagnostic(job.action, job.payload.get("target", ""))
+                if job.action == "ping" and "count" in job.payload:
+                    output = driver.diagnostic(job.action, job.payload.get("target", ""), count=job.payload["count"])
+                else:
+                    output = driver.diagnostic(job.action, job.payload.get("target", ""))
             elif job.action in ("preview", "apply"):
-                change = ConfigChange.objects.get(pk=job.payload["change_id"], switch=switch)
-                if change.status != f"{job.action}ing":
+                ids = job.payload.get("change_ids", [job.payload.get("change_id")])
+                if switch.driver == "netgear_gs108tv2" and len(ids) != 1:
+                    raise DriverError("NETGEAR has no combined transaction. Commit one staged item at a time.")
+                changes = list(ConfigChange.objects.filter(pk__in=ids, switch=switch).order_by("pk"))
+                if not changes or len(changes) != len(ids) or any(item.status != f"{job.action}ing" for item in changes):
                     raise ValueError("Change is no longer available.")
-                commands = change.commands.splitlines()
+                change = changes[0]
+                if any(item.base_revision_id != change.base_revision_id for item in changes):
+                    raise ValueError("Combined changes must share one baseline.")
+                commands = [line for item in changes for line in item.commands.splitlines()]
                 if job.action == "preview":
                     if driver.get_config() != change.base_revision.config:
                         raise ValueError("Configuration changed. Synchronize and stage a new change.")
                     output = driver.preview(commands)
-                    ConfigChange.objects.filter(pk=change.pk).update(status="pending")
+                    ConfigChange.objects.filter(pk__in=ids).update(status="pending")
                 else:
                     output = driver.apply(commands, expected_config=change.base_revision.config)
-                    ConfigChange.objects.filter(pk=change.pk).update(status="committed")
+                    ConfigChange.objects.filter(pk__in=ids).update(status="committed")
                     # Persist the new revision even if subsequent telemetry collection fails.
                     record_revision(switch, driver.get_config(), "commit", job.created_by)
                     synchronize(switch, driver, "commit", job.created_by)
@@ -98,9 +114,9 @@ def execute_job(job_id):
                 synchronize(switch, driver, "restore", job.created_by)
         job.status = "success"
         job.output = output
-    except Exception:
+    except Exception as error:
         job.status = "failed"
-        job.output = (
+        job.output = str(error) if isinstance(error, DriverError) else (
             "Operation failed or access was revoked. Check connectivity, credentials, trusted host keys "
             "and driver support. Synchronize before retrying: a remote commit may already have succeeded."
         )
@@ -109,8 +125,9 @@ def execute_job(job_id):
             Switch.objects.filter(pk=switch.pk).update(status="offline")
         if job.action in ("preview", "apply"):
             ConfigChange.objects.filter(
-                pk=job.payload.get("change_id"), switch=switch, status=f"{job.action}ing"
-            ).update(status="pending")
+                pk__in=job.payload.get("change_ids", [job.payload.get("change_id")]), switch=switch, status=f"{job.action}ing"
+            ).update(status="uncertain" if isinstance(error, PartialApply) else "pending")
+        logger.warning("Switch job %s failed (%s).", job.pk, type(error).__name__)
     finally:
         job.completed_at = timezone.now()
         job.save(update_fields=["status", "output", "completed_at"])
@@ -132,13 +149,13 @@ def poll_switches():
         expired.save(update_fields=["status", "output", "completed_at"])
         if expired.action in ("preview", "apply"):
             ConfigChange.objects.filter(
-                pk=expired.payload.get("change_id"), switch_id=expired.switch_id,
+                pk__in=expired.payload.get("change_ids", [expired.payload.get("change_id")]), switch_id=expired.switch_id,
                 status=f"{expired.action}ing",
-            ).update(status="pending")
+            ).update(status="uncertain" if expired.action == "apply" and expired.switch.driver == "netgear_gs108tv2" else "pending")
         notify_switch(expired.switch_id)
-    for switch in Switch.objects.filter(active=True).defer("snapshot"):
+    for switch in Switch.objects.filter(active=True, monitoring_enabled=True).defer("snapshot"):
         with transaction.atomic():
-            switch = Switch.objects.select_for_update().defer("snapshot").filter(pk=switch.pk, active=True).first()
+            switch = Switch.objects.select_for_update().defer("snapshot").filter(pk=switch.pk, active=True, monitoring_enabled=True).first()
             if switch is None or switch.jobs.filter(status__in=["queued", "running"]).exists():
                 continue
             job = Job.objects.create(switch=switch, action="sync")
@@ -149,20 +166,37 @@ def poll_switches():
 def discover_switches(run_id):
     if not DiscoveryRun.objects.filter(pk=run_id, status="queued").update(status="running"):
         return
+    notify_live("discovery")
     run = DiscoveryRun.objects.select_related("created_by").get(pk=run_id)
     results = []
+    run.error = ""
     try:
         if run.created_by is None or not run.created_by.is_active or not run.created_by.has_perm("switches.discover_switches"):
             raise ValueError("Discovery permission was revoked.")
         network = validate_network(run.network)
-        for address in network.hosts():
+        for scanned, address in enumerate(network.hosts(), start=1):
+            run.scanned = scanned
+            if not run.credential_id and not run.credential_env:
+                if Switch.objects.filter(address=str(address)).exists():
+                    DiscoveryRun.objects.filter(pk=run.pk).update(results=results, scanned=scanned)
+                    notify_live("discovery")
+                    continue
+                candidate = probe_candidate(str(address), run.port)
+                if candidate:
+                    results.append(candidate)
+                DiscoveryRun.objects.filter(pk=run.pk).update(results=results, scanned=scanned)
+                notify_live("discovery")
+                continue
             existing = Switch.objects.filter(address=str(address)).first()
             if existing is not None:
                 # Discovery must never overwrite an existing switch's credentials or access.
+                DiscoveryRun.objects.filter(pk=run.pk).update(scanned=scanned)
+                notify_live("discovery")
                 continue
             device = SimpleNamespace(
                 address=str(address), driver=run.driver, port=run.port, username=run.username,
                 credential_env=run.credential_env, model="",
+                credential=run.credential,
             )
             try:
                 with get_driver(device) as driver:
@@ -176,6 +210,7 @@ def discover_switches(run_id):
                             "model": str(facts.get("model", ""))[:100],
                             "driver": run.driver, "port": run.port, "username": run.username,
                             "credential_env": run.credential_env,
+                            "credential": run.credential,
                         },
                     )
                     if created:
@@ -184,12 +219,24 @@ def discover_switches(run_id):
 
                         SwitchAccess.objects.create(switch=switch, user=run.created_by, role="admin")
                 results.append({"address": str(address), "switch_id": switch.pk, "status": "found"})
-            except Exception:
-                results.append({"address": str(address), "status": "unreachable or unsupported"})
-            DiscoveryRun.objects.filter(pk=run.pk).update(results=results)
+            except DriverError as error:
+                logger.warning("Discovery verification failed for run %s: %s", run.pk, error)
+                results.append({
+                    "address": str(address), "status": "unreachable or unsupported",
+                    "error": str(error),
+                })
+            except Exception as error:
+                logger.error("Unexpected discovery verification failure for run %s (%s).", run.pk, type(error).__name__)
+                results.append({
+                    "address": str(address), "status": "unreachable or unsupported",
+                    "error": "Unexpected verification failure. Check the worker logs.",
+                })
+            DiscoveryRun.objects.filter(pk=run.pk).update(results=results, scanned=scanned)
+            notify_live("discovery")
         run.status = "success"
     except Exception:
         run.status = "failed"
+        run.error = "Discovery could not complete. Check scanning permission, network input and worker logs."
     finally:
         run.results = results
-        run.save(update_fields=["status", "results"])
+        run.save(update_fields=["status", "results", "error", "scanned"])

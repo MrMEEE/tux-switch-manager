@@ -1,4 +1,30 @@
-<section class="panel"><div class="heading"><h2>Live state</h2><span class="badge">{{ switch.status }}</span></div><p class="muted">Last synchronized: {{ switch.last_synced|default:"Never" }}</p><details open><summary>System snapshot & LLDP topology</summary><pre>{{ snapshot_text }}</pre></details></section>
-{% if operator %}<section class="panel"><h2>Pending configuration</h2>{% for change in changes %}<article class="change"><h3>Change #{{ change.pk }} <span class="badge">{{ change.status }}</span></h3><p class="muted">Baseline #{{ change.base_revision_id }} · {{ change.created_at }}</p><pre>{{ change.commands }}</pre><form class="actions" method="post" action="{% url 'change-action' switch.pk change.pk %}">{% csrf_token %}<button name="action" value="preview" class="quiet">Preview / compare</button><button name="action" value="apply" data-confirm-button="Commit this configuration change?">Commit</button><button name="action" value="discard" class="danger">Discard</button></form><p class="muted">Preview diff and commit results are in job output below.</p></article>{% empty %}<p class="muted">No pending changes.</p>{% endfor %}</section>{% endif %}
+{% if operator %}
+<section class="panel" id="configuration-review" role="tabpanel" aria-labelledby="tab-review" data-configuration-panel>
+  <h2>Review and Commit</h2>
+  {% if web_driver %}<p class="notice">NETGEAR uses unencrypted HTTP. Preview is a local planned diff, not a device commit-check. Commit writes immediately without a remote lock, atomic transaction or rollback, then verifies managed-field readback. Startup persistence is not verified; use Save Configuration in the switch GUI after inspecting the result. Commit one item at a time, synchronize and restage other items against the new baseline. An uncertain change cannot be retried: inspect actual state and discard/restage it.</p>
+  {% else %}<p class="muted">These changes are staged, not applied. Preview checks the synchronized baseline and compares the candidate without committing. Open its job output to inspect the diff, then commit when ready. Preview or commit all combines pending changes sharing the current baseline, in staging order, into one transaction.</p>{% endif %}
+  {% if changes %}<form class="actions" method="post" action="{% url 'pending-action' switch.pk %}">{% csrf_token %}
+    {% if not web_driver %}<button name="action" value="preview" class="quiet">Preview all pending</button>
+    <button name="action" value="apply" data-confirm-button="Commit all pending changes as one transaction?">Commit all pending</button>
+    {% endif %}
+    <button name="action" value="discard" class="danger" data-confirm-button="Discard all pending changes?">Discard all pending</button>
+  </form>{% endif %}
+  {% for change in changes %}
+  <article class="change" data-live-key="change-{{ change.pk }}">
+    <h3>Change #{{ change.pk }} <span class="badge">{{ change.status }}</span></h3>
+    <p class="muted">Baseline #{{ change.base_revision_id }} · {{ change.created_at }}</p>
+    {% if change.reason %}<p>Reason: {{ change.reason }}</p>{% endif %}
+    <details data-live-key="commands-{{ change.pk }}"><summary>Review generated commands</summary><pre>{{ change.commands }}</pre></details>
+    <form class="actions" method="post" action="{% url 'change-action' switch.pk change.pk %}">{% csrf_token %}
+      {% if change.status == 'pending' %}<button name="action" value="preview" class="quiet">Preview / compare</button>
+      <button name="action" value="apply" data-confirm-button="{% if web_driver %}Apply this change immediately over HTTP without rollback? Connectivity may be lost; startup save is not verified.{% else %}Commit this configuration change?{% endif %}">Commit</button>{% endif %}
+      <button name="action" value="discard" class="danger">Discard</button>
+    </form>
+    <p class="muted">Preview diff and commit results appear in job output below.</p>
+  </article>
+  {% empty %}<p class="muted">No staged changes. Edit an item in Current configuration to begin.</p>{% endfor %}
+</section>
+{% endif %}
+<section class="panel"><div class="heading"><h2>Live state</h2><span class="badge">{{ switch.status }}</span></div><p class="muted">Last synchronized: {{ switch.last_synced|default:"Never" }}</p><details data-live-key="system-snapshot"><summary>Advanced · raw system snapshot and LLDP topology</summary><pre>{{ snapshot_text }}</pre></details></section>
 <section class="panel"><h2>Async job history</h2><div class="table-scroll"><table><thead><tr><th>Job</th><th>Operation</th><th>Status</th><th>Created</th><th>Output</th></tr></thead><tbody>{% for job in jobs %}<tr><td>#{{ job.pk }}</td><td>{{ job.action }}</td><td><span class="badge">{{ job.status }}</span></td><td>{{ job.created_at|date:"M j H:i:s" }}</td><td><a href="{% url 'job-detail' switch.pk job.pk %}">View output →</a></td></tr>{% empty %}<tr><td colspan="5">No operations yet.</td></tr>{% endfor %}</tbody></table></div></section>
 {% if operator %}<section class="panel"><h2>Configuration revisions</h2><div class="table-scroll"><table><thead><tr><th>Revision</th><th>Source</th><th>Captured</th><th>Review</th></tr></thead><tbody>{% for revision in revisions %}<tr><td>#{{ revision.pk }}</td><td>{{ revision.source }}</td><td>{{ revision.created_at }}</td><td><a href="{% url 'revision-detail' switch.pk revision.pk %}">Config & diff →</a></td></tr>{% empty %}<tr><td colspan="4">Sync the switch to capture the first baseline.</td></tr>{% endfor %}</tbody></table></div></section>{% endif %}

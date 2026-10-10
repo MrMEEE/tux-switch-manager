@@ -26,7 +26,7 @@ async def collect_interfaces(device):
     interfaces = {}
     try:
         transport = Udp6TransportTarget if ":" in device.address else UdpTransportTarget
-        target = await transport.create((device.address, device.snmp_port), timeout=2, retries=0)
+        target = await transport.create((device.address, device.snmp_port), timeout=getattr(device, "snmp_timeout", 2), retries=0)
         for column, oid in COLUMNS.items():
             async for error, status, index, bindings in bulk_walk_cmd(
                 engine, CommunityData(community, mpModel=1), target, ContextData(),

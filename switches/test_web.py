@@ -11,7 +11,7 @@ from django.contrib.sessions.models import Session
 from django.test import Client, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 
-from .models import ConfigChange, ConfigRevision, DiscoveryRun, Job, Switch, SwitchAccess
+from .models import ConfigChange, ConfigRevision, Credential, DiscoveryRun, Job, Switch, SwitchAccess
 
 TEST_PASSWORD = "test-" + "password"
 
@@ -164,14 +164,21 @@ class WebTests(TestCase):
             self.assertEqual(self.client.post(self.url("switch-action"), {"action": "apply"}).status_code, 403)
             queue.assert_not_called()
 
-    def test_operator_stage_and_immediate_apply(self):
+    def test_operator_stage_rejects_immediate_apply(self):
         self.client.force_login(self.operator)
         with patch("switches.views.services.queue_change") as queue:
             response = self.client.post(self.url("switch-stage"), {"section": "system", "commands": "set system host-name new", "immediate": "on"})
+            self.assertContains(response, "Immediate apply is disabled")
+            self.assertEqual(ConfigChange.objects.count(), 1)
+            queue.assert_not_called()
+            response = self.client.post(self.url("switch-stage"), {
+                "section": "system", "commands": "set system host-name new", "reason": "Maintenance",
+            })
             self.assertEqual(response.status_code, 302)
             change = ConfigChange.objects.first()
             self.assertEqual(change.commands, "set system host-name new")
-            queue.assert_called_once_with(change, action="apply", user=self.operator)
+            self.assertEqual(change.reason, "Maintenance")
+            queue.assert_not_called()
 
     def test_structured_builder_stages_driver_commands(self):
         self.client.force_login(self.operator)
@@ -376,7 +383,8 @@ class WebTests(TestCase):
 
     def test_inventory_creation_grants_only_creator_admin_and_edit_requires_admin(self):
         self.viewer.user_permissions.add(Permission.objects.get(codename="manage_inventory"))
-        data = {"name": "Added", "address": "192.0.2.5", "port": 22, "driver": "juniper_ex", "username": "user", "credential_env": "SWITCH_CREDENTIAL_TEST", "active": "on"}
+        credential = Credential.objects.create(name="Inventory", username="user", password=TEST_PASSWORD)
+        data = {"name": "Added", "address": "192.0.2.5", "port": 22, "driver": "juniper_ex", "credential": credential.pk, "active": "on"}
         self.assertEqual(self.client.post(reverse("switch-add"), data).status_code, 302)
         added = Switch.objects.get(name="Added")
         self.assertEqual(list(added.access.values_list("user_id", "role")), [(self.viewer.pk, "admin")])
@@ -391,7 +399,8 @@ class WebTests(TestCase):
 
     def test_optional_snmp_inventory_fields(self):
         self.viewer.user_permissions.add(Permission.objects.get(codename="manage_inventory"))
-        data = {"name": "SNMP edge", "address": "192.0.2.6", "port": 22, "driver": "juniper_ex", "username": "user", "credential_env": "SWITCH_CREDENTIAL_TEST", "active": "on"}
+        credential = Credential.objects.create(name="SNMP inventory", username="user", password=TEST_PASSWORD)
+        data = {"name": "SNMP edge", "address": "192.0.2.6", "port": 22, "driver": "juniper_ex", "credential": credential.pk, "active": "on"}
         self.assertEqual(self.client.post(reverse("switch-add"), data).status_code, 302)
         switch = Switch.objects.get(address=data["address"])
         self.assertFalse(switch.snmp_enabled)
@@ -471,17 +480,15 @@ class WebTests(TestCase):
         self.assertEqual(self.client.post(reverse("revision-restore", args=[self.switch.pk, self.revision.pk])).status_code, 302)
         queue.assert_called_once_with(self.switch, self.revision, self.operator)
 
-    @override_settings(DISCOVERY_NETWORKS=["192.0.2.0/24", "10.0.0.0/8"])
-    def test_discovery_requires_permission_and_bounded_allowlist(self):
+    def test_discovery_requires_permission_and_bounded_network(self):
         self.assertEqual(self.client.get(reverse("discovery")).status_code, 403)
+        self.assertEqual(self.client.post(reverse("discovery"), {}).status_code, 403)
         self.viewer.user_permissions.add(Permission.objects.get(codename="discover_switches"))
         data = {"network": "10.0.0.0/16", "driver": "juniper_ex", "port": 22, "username": "user", "credential_env": "SWITCH_CREDENTIAL_TEST"}
         with patch("switches.views.services.queue_discovery") as queue:
             self.assertContains(self.client.post(reverse("discovery"), data), "256 addresses")
             data["network"] = "198.51.100.0/24"
-            self.assertContains(self.client.post(reverse("discovery"), data), "not in DISCOVERY_NETWORKS")
             queue.assert_not_called()
-            data["network"] = "192.0.2.0/28"
             self.assertEqual(self.client.post(reverse("discovery"), data).status_code, 302)
             queue.assert_called_once()
 

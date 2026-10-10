@@ -299,19 +299,17 @@ class BackendTests(TestCase):
         self.assertEqual(set(result["1"]), set(COLUMNS))
         engine.close_dispatcher.assert_called_once()
 
-    @override_settings(DISCOVERY_NETWORKS=["192.0.2.0/24"])
     def test_discovery_network_bounds(self):
         self.assertEqual(str(validate_network("192.0.2.0/30")), "192.0.2.0/30")
-        for network in ["0.0.0.0/0", "192.0.3.0/24", "192.0.2.1/24", "::/0"]:
+        for network in ["0.0.0.0/0", "192.0.2.0/23", "192.0.2.1/24", "::/0", "2001:db8::/119"]:
             with self.subTest(network=network), self.assertRaises(ValueError):
                 validate_network(network)
 
-    @override_settings(DISCOVERY_NETWORKS=[])
-    def test_discovery_fails_closed_without_allowlist(self):
-        with self.assertRaises(ValueError):
-            validate_network("192.0.2.0/24")
+    def test_discovery_accepts_any_bounded_network(self):
+        for network in ["192.0.3.0/24", "198.51.100.0/24", "10.0.0.0/24", "2001:db8::/120", "::1/128"]:
+            with self.subTest(network=network):
+                self.assertEqual(str(validate_network(network)), network)
 
-    @override_settings(DISCOVERY_NETWORKS=["192.0.2.0/24"])
     def test_discovery_requires_permission_and_valid_credential_reference(self):
         with self.assertRaises(ValueError):
             queue_discovery("192.0.2.0/30", "juniper_ex", 22, "manager", "SWITCH_CREDENTIAL_LAB", self.user)
@@ -323,7 +321,6 @@ class BackendTests(TestCase):
                 run = queue_discovery("192.0.2.0/30", "juniper_ex", 22, "manager", "SWITCH_CREDENTIAL_LAB", self.user)
         publish.assert_called_once_with(run.pk)
 
-    @override_settings(DISCOVERY_NETWORKS=["192.0.2.0/24"])
     def test_discovery_adds_inventory_and_access_without_overwriting(self):
         self.user.user_permissions.add(Permission.objects.get(codename="discover_switches"))
         run = DiscoveryRun.objects.create(

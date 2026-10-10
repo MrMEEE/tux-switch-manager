@@ -1,0 +1,49 @@
+# Tux Switch Manager configuration.
+#
+# Copy this file to config/config.conf and adjust it:
+#   cp config/config.conf.sample config/config.conf
+#   chmod 600 config/config.conf
+#
+# config/config.conf is read by ./tux-switch-manager as a shell script and its
+# variables are exported to the web server, Celery worker and Celery Beat.
+# It contains secrets: never commit it to source control.
+
+# Required. Generate each value once and keep it stable between restarts:
+#   python3 -c 'import secrets; print(secrets.token_urlsafe(64))'
+DJANGO_SECRET_KEY=""
+# Losing this key makes stored revisions, snapshots and job output unreadable.
+# Back it up separately from the database:
+#   .venv/bin/python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'
+CONFIG_ENCRYPTION_KEY=""
+
+# Set to 1 only for local development. Leave at 0 in production.
+DJANGO_DEBUG=0
+DJANGO_ALLOWED_HOSTS="localhost,127.0.0.1"
+# Comma-separated origins, for example: https://switches.example.com
+DJANGO_CSRF_TRUSTED_ORIGINS=""
+# Set to 1 only behind a trusted TLS-terminating proxy that sets
+# X-Forwarded-Proto itself and strips client-supplied values.
+DJANGO_TRUST_PROXY_HTTPS=0
+
+REDIS_URL="redis://127.0.0.1:6379/0"
+# The launcher starts a user-owned Redis if this local endpoint is unavailable.
+# Existing Redis instances are reused and never stopped by the launcher.
+# Optional. Defaults to db.sqlite3 in the project directory.
+#DATABASE_PATH="/var/lib/tux-switch-manager/db.sqlite3"
+
+SWITCH_KNOWN_HOSTS="$HOME/.ssh/known_hosts"
+# Polling interval in seconds (minimum 30).
+SWITCH_POLL_SECONDS=60
+# Optional fallback when service fingerprints cannot identify a vendor.
+# IEEE MA-L CSV, provided by the ieee-data package on Debian/Ubuntu.
+DISCOVERY_OUI_FILE="/usr/share/ieee-data/oui.csv"
+
+# Switch SSH/SNMP credentials. Enter the variable name, for example
+# SWITCH_CREDENTIAL_LAB, in the switch's credential-reference field.
+#SWITCH_CREDENTIAL_LAB=""
+
+# Web server bind address and port used by ./tux-switch-manager.
+TUX_SWITCH_BIND_HOST="127.0.0.1"
+TUX_SWITCH_PORT=8000
+# Python interpreter used to create .venv (3.12 or newer).
+#TUX_SWITCH_PYTHON="python3"

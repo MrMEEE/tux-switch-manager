@@ -1,2 +1,14 @@
 {% extends 'switches/base.html' %}
-{% block content %}<div class="heading"><div><p class="eyebrow">INVENTORY EXPLORATION</p><h1>Subnet discovery</h1><p class="muted">Only administrator-approved networks, bounded to 256 addresses. SSH host keys must be trusted.</p></div></div><div class="columns"><section class="panel"><h2>Start a discovery</h2><form method="post">{% csrf_token %}{{ form.as_p }}<button>Discover network</button></form></section><section class="panel"><h2>Discovery history</h2>{% for run in runs %}<article class="change"><h3>{{ run.network }} <span class="badge">{{ run.status }}</span></h3><p>{{ run.created_at }}</p><pre>{{ run.results }}</pre></article>{% empty %}<p class="muted">No discovery runs yet.</p>{% endfor %}</section></div>{% endblock %}
+{% block content %}
+<div class="heading"><div><p class="eyebrow">INVENTORY EXPLORATION</p><h1>Subnet discovery</h1><p class="muted">Scan any network with the scanning permission, bounded to 256 addresses. Leave credentials blank to find candidates without logging in.</p></div></div>
+<div class="columns">
+<section class="panel">
+  <div class="section-header"><div><h2>Start a discovery</h2><p class="muted">Python SSH and HTTP/HTTPS probes look for network-vendor fingerprints or SSH on the NETCONF port. If no vendor fingerprint is found, local MAC/OUI lookup can identify a known network manufacturer on a directly connected subnet. Open ports alone are excluded. No sudo, OS fingerprinting, default passwords or SNMP communities are used. Candidates may also be servers, routers or access points; authenticated verification is required.</p></div></div>
+  <form method="post" class="stack">{% csrf_token %}{% include 'switches/form_fields.html' %}<div class="form-actions"><button>Discover network</button></div></form>
+</section>
+<section class="panel">
+  <div class="section-header"><div><h2>Discovery history</h2><p class="muted">Results update live. Assign a credential to verify a candidate. The driver's supported-model check and trusted SSH host keys are required before inventory enrollment.</p></div></div>
+  <p class="muted live-connection" aria-live="polite">Live updates connecting…</p>
+  <div data-live-url="/ws/live/discovery/">{% include 'switches/discovery_history.html' %}</div>
+</section></div>
+{% endblock %}

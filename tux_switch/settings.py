@@ -47,6 +47,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -166,7 +167,8 @@ CHANNEL_LAYERS = {
 CONFIG_ENCRYPTION_KEY = os.environ.get("CONFIG_ENCRYPTION_KEY", "")
 SWITCH_KNOWN_HOSTS = os.environ.get("SWITCH_KNOWN_HOSTS", str(Path.home() / ".ssh/known_hosts"))
 SWITCH_TIMEOUT = 20
-SWITCH_DRIVERS = {"juniper_ex": "switches.drivers.juniper.JuniperEXDriver"}
-DISCOVERY_NETWORKS = [
-    value for value in os.environ.get("DISCOVERY_NETWORKS", "").split(",") if value
-]
+DISCOVERY_OUI_FILE = os.environ.get("DISCOVERY_OUI_FILE", "/usr/share/ieee-data/oui.csv")
+SWITCH_DRIVERS = {
+    "juniper_ex": "switches.drivers.juniper.JuniperEXDriver",
+    "netgear_gs108tv2": "switches.drivers.netgear.NetgearGS108Tv2Driver",
+}

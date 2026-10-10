@@ -1,0 +1,1 @@
+<h1>Job #{{ job.pk }} · {{ job.action }}</h1><p><span class="badge">{{ job.status }}</span> {{ job.created_at }}{% if job.completed_at %} · Completed {{ job.completed_at }}{% endif %}</p><h2>Output</h2><pre>{{ job.output|default:"Awaiting worker output." }}</pre>

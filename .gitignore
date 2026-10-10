@@ -3,6 +3,9 @@ __pycache__/
 *.sqlite3
 .env
 .venv/
+.run/
+.redis/
+config/config.conf
 staticfiles/
 celerybeat-schedule*
 *.log

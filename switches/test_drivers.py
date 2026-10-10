@@ -78,7 +78,12 @@ class FakeChannel:
             ET.SubElement(error, "error-severity").text = "error"
             ET.SubElement(error, "error-message").text = "sensitive-device-detail"
         elif label == "get-config":
-            ET.SubElement(reply, "configuration-text").text = self.committed_config
+            if op.get("format") == "xml":
+                config = ET.SubElement(reply, "configuration")
+                system = ET.SubElement(config, "system")
+                ET.SubElement(system, "host-name").text = "new" if "new" in self.committed_config else "old"
+            else:
+                ET.SubElement(reply, "configuration-text").text = self.committed_config
         elif label == "compare":
             ET.SubElement(reply, "configuration-output").text = self.pending
         elif label == "load":
@@ -153,6 +158,56 @@ class DriverTests(unittest.TestCase):
         self.client.load_host_keys.side_effect = OSError("sensitive-device-detail")
         with self.assertRaisesRegex(DriverError, "trusted NETCONF"):
             self.driver.__enter__()
+        self.client.close.assert_called()
+
+    def test_missing_host_key_has_actionable_safe_error(self):
+        from .drivers.juniper import TrustedHostPolicy
+
+        with self.assertRaisesRegex(DriverError, "host key is not trusted") as error:
+            TrustedHostPolicy().missing_host_key(self.client, "private-host", paramiko.RSAKey.generate(1024))
+        self.assertNotIn("private-host", str(error.exception))
+
+    def test_approved_host_key_is_loaded_for_exact_port(self):
+        self.driver.close()
+        key = paramiko.RSAKey.generate(1024)
+        self.client.get_host_keys.return_value = paramiko.HostKeys()
+        self.client._system_host_keys = paramiko.HostKeys()
+        self.driver.port = 830
+        self.driver.trusted_host_key = (key.get_name(), key.get_base64())
+        self.channel.wire = FakeChannel().wire
+        with self.driver:
+            installed = self.client.get_host_keys().lookup("[192.0.2.1]:830")
+            self.assertEqual(installed[key.get_name()], key)
+
+    def test_approved_key_cannot_replace_existing_system_or_configured_trust(self):
+        self.driver.close()
+        approved = paramiko.RSAKey.generate(1024)
+        different = paramiko.RSAKey.generate(1024)
+        self.driver.trusted_host_key = (approved.get_name(), approved.get_base64())
+        for source in ("system", "configured"):
+            with self.subTest(source=source):
+                configured = paramiko.HostKeys()
+                system = paramiko.HostKeys()
+                (system if source == "system" else configured).add("192.0.2.1", different.get_name(), different)
+                self.client.get_host_keys.return_value = configured
+                self.client._system_host_keys = system
+                with self.assertRaisesRegex(DriverError, "does not match"):
+                    self.driver.__enter__()
+
+    def test_authentication_failure_has_safe_error(self):
+        self.driver.close()
+        self.client.connect.side_effect = paramiko.AuthenticationException("test-credential")
+        with self.assertRaisesRegex(DriverError, "authentication failed") as error:
+            self.driver.__enter__()
+        self.assertNotIn("test-credential", str(error.exception))
+        self.client.close.assert_called()
+
+    def test_netconf_subsystem_rejection_has_safe_error(self):
+        self.driver.close()
+        with patch.object(self.channel, "invoke_subsystem", side_effect=paramiko.SSHException("private-detail")):
+            with self.assertRaisesRegex(DriverError, "NETCONF subsystem was rejected") as error:
+                self.driver.__enter__()
+        self.assertNotIn("private-detail", str(error.exception))
         self.client.close.assert_called()
 
     def test_capabilities(self):

@@ -1,6 +1,8 @@
 """Original NETCONF 1.0 Junos implementation, including older non-ELS EX3300s."""
 
 import math
+import base64
+import hashlib
 import re
 import socket
 import time
@@ -8,7 +10,7 @@ import xml.etree.ElementTree as ET
 
 import paramiko
 
-from .base import BaseDriver, ConfigConflict, DriverError
+from .base import BaseDriver, ConfigConflict, DriverError, UntrustedHostKey
 from . import validation
 
 
@@ -16,6 +18,14 @@ NETCONF = "urn:ietf:params:xml:ns:netconf:base:1.0"
 NETCONF_CAPABILITY = "urn:ietf:params:netconf:base:1.0"
 DELIMITER = b"]]>]]>"
 MAX_REPLY = 16 * 1024 * 1024
+
+
+class TrustedHostPolicy(paramiko.RejectPolicy):
+    def missing_host_key(self, client, hostname, key):
+        fingerprint = base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
+        raise UntrustedHostKey(
+            key.get_name(), key.get_base64(), f"SHA256:{fingerprint}",
+        )
 
 
 def _local(tag):
@@ -99,6 +109,11 @@ class JuniperEXDriver(BaseDriver):
         "interfaces_config": ("interfaces",),
         "vlans_config": ("vlans",),
         "routing_config": ("routing-options", "protocols"),
+        "lldp_config": ("protocols/lldp",),
+        "dot1x_config": ("protocols/dot1x",),
+        "port_security_config": ("ethernet-switching-options",),
+        "dhcp_config": ("system/services/dhcp",),
+        "firewall_config": ("firewall",),
     }
     monitor_sections = frozenset(MONITOR_COMMANDS) | frozenset(CONFIG_SECTIONS)
 
@@ -129,7 +144,16 @@ class JuniperEXDriver(BaseDriver):
             client.load_system_host_keys()
             if self.known_hosts:
                 client.load_host_keys(self.known_hosts)
-            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+            if self.trusted_host_key:
+                algorithm, public_key = self.trusted_host_key
+                key = paramiko.PKey.from_type_string(algorithm, base64.b64decode(public_key, validate=True))
+                hostname = self.host if self.port == 22 else f"[{self.host}]:{self.port}"
+                for existing_keys in (client.get_host_keys(), client._system_host_keys):
+                    existing = existing_keys.lookup(hostname)
+                    if existing and (algorithm not in existing or existing[algorithm] != key):
+                        raise DriverError("SSH host key does not match the trusted key. Verify the switch fingerprint.")
+                client.get_host_keys().add(hostname, algorithm, key)
+            client.set_missing_host_key_policy(TrustedHostPolicy())
             client.connect(
                 hostname=self.host, port=self.port, username=self.username,
                 timeout=self.timeout,
@@ -141,7 +165,13 @@ class JuniperEXDriver(BaseDriver):
                 raise DriverError("SSH transport is unavailable.")
             self._channel = transport.open_session(timeout=self.timeout)
             self._channel.settimeout(self.timeout)
-            self._channel.invoke_subsystem("netconf")
+            try:
+                self._channel.invoke_subsystem("netconf")
+            except paramiko.SSHException:
+                raise DriverError(
+                    "SSH connected, but the NETCONF subsystem was rejected. Enable NETCONF "
+                    "on Junos and use its configured port (normally 830)."
+                ) from None
             hello = _element(f"{{{NETCONF}}}hello")
             capabilities = ET.SubElement(hello, f"{{{NETCONF}}}capabilities")
             ET.SubElement(capabilities, f"{{{NETCONF}}}capability").text = NETCONF_CAPABILITY
@@ -156,6 +186,18 @@ class JuniperEXDriver(BaseDriver):
         except DriverError:
             self.close()
             raise
+        except paramiko.BadHostKeyException:
+            self.close()
+            raise DriverError(
+                "SSH host key does not match the trusted key. Verify the switch fingerprint "
+                "before updating known_hosts."
+            ) from None
+        except paramiko.AuthenticationException:
+            self.close()
+            raise DriverError("SSH authentication failed. Check the saved credential and Junos login permissions.") from None
+        except (TimeoutError, paramiko.ssh_exception.NoValidConnectionsError, ConnectionError):
+            self.close()
+            raise DriverError("SSH connection failed or timed out. Check reachability and the configured port.") from None
         except Exception:
             self.close()
             raise DriverError("Unable to establish a trusted NETCONF SSH connection.") from None
@@ -283,6 +325,13 @@ class JuniperEXDriver(BaseDriver):
             raise DriverError("Switch did not return configuration text.")
         return "".join(node.itertext())
 
+    def get_config_xml(self):
+        reply = self._rpc(_element("get-configuration", database="committed", format="xml"))
+        config = _find(reply, "configuration")
+        if config is None:
+            raise DriverError("Switch did not return structured configuration.")
+        return ET.tostring(config, encoding="unicode")
+
     def run_command(self, command):
         validated = validation.show_command(command)
         return self._output(self._rpc(_element("command", validated, format="text")))
@@ -311,6 +360,14 @@ class JuniperEXDriver(BaseDriver):
 
     def snapshot(self):
         result = {"facts": self.get_facts(), "config": self.get_config(), "errors": {}}
+        try:
+            result["config_xml"] = self.get_config_xml()
+            # The GUI must not associate XML with a text baseline changed during collection.
+            if self.get_config() != result["config"]:
+                result.pop("config_xml")
+                result["errors"]["config_xml"] = "Configuration changed during collection. Synchronize again."
+        except DriverError as error:
+            result["errors"]["config_xml"] = str(error)
         for section in (*self.MONITOR_COMMANDS, *self.CONFIG_SECTIONS):
             try:
                 result[section] = self.monitor(section)
@@ -321,7 +378,7 @@ class JuniperEXDriver(BaseDriver):
                 result["errors"][section] = "Monitoring section unavailable."
         return result
 
-    def diagnostic(self, action, target=""):
+    def diagnostic(self, action, target="", count=5):
         if not isinstance(action, str):
             raise DriverError("Unknown diagnostic action.")
         if action == "reboot":
@@ -334,7 +391,7 @@ class JuniperEXDriver(BaseDriver):
             ET.SubElement(operation, "host").text = destination
             ET.SubElement(operation, "no-resolve")
             if action == "ping":
-                ET.SubElement(operation, "count").text = "5"
+                ET.SubElement(operation, "count").text = str(validation.integer(count, 1, 100))
                 ET.SubElement(operation, "rapid")
             else:
                 ET.SubElement(operation, "wait").text = "1"

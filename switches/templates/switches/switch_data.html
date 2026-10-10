@@ -1,0 +1,5 @@
+<section class="panel"><h2>{{ switch.name }}</h2><p class="mono">{{ switch.address }}:{{ switch.port }} · {{ switch.model }}</p><p><span class="badge">{{ switch.status }}</span> · Last sync: {{ switch.last_synced|date:"M j, H:i"|default:"Never" }}</p><p class="muted">Automatic monitoring: {{ switch.monitoring_enabled|yesno:"Enabled,Disabled" }}</p>{% if switch.notes %}<p>{{ switch.notes|linebreaksbr }}</p>{% endif %}</section>
+<div data-configuration-workspace>
+  {% include 'switches/configuration_data.html' %}
+  {% include 'switches/live.html' %}
+</div>

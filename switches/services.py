@@ -33,6 +33,7 @@ def action_role(action, payload):
 
 
 def notify_switch(switch_id):
+    notify_live("switch")
     try:
         async_to_sync(get_channel_layer().group_send)(
             f"switch.{switch_id}", {"type": "switch.updated", "switch_id": switch_id}
@@ -40,6 +41,14 @@ def notify_switch(switch_id):
     except Exception:
         # A notification outage must not cause a committed operation to be retried.
         logger.warning("Switch notification delivery failed for switch %s", switch_id)
+
+def notify_live(resource):
+    try:
+        async_to_sync(get_channel_layer().group_send)(
+            "live.updates", {"type": "live.updated", "resource": resource},
+        )
+    except Exception:
+        logger.warning("Live update delivery failed for %s.", resource)
 
 
 def publish_job(job_id):
@@ -57,7 +66,7 @@ def publish_job(job_id):
         )
         if queued.action in ("preview", "apply"):
             ConfigChange.objects.filter(
-                pk=queued.payload.get("change_id"), switch_id=queued.switch_id,
+                pk__in=queued.payload.get("change_ids", [queued.payload.get("change_id")]), switch_id=queued.switch_id,
                 status=f"{queued.action}ing",
             ).update(status="pending")
         notify_switch(queued.switch_id)
@@ -74,10 +83,60 @@ def queue_job(switch, action, payload, user):
             raise ValueError("You do not have permission for this operation.")
         if not switch.active:
             raise ValueError("This switch is inactive.")
+        from .drivers.registry import driver_class
+        from .drivers.base import DriverError
+        try:
+            registered = driver_class(switch.driver)
+            capability = {"sync": "snapshot", "ping": "diagnostic", "traceroute": "diagnostic",
+                          "reboot": "diagnostic", "command": "run_command"}.get(action, action)
+            if capability not in registered.capabilities:
+                raise DriverError("This driver does not support that operation.")
+            if action == "monitor" and payload.get("section") not in registered.monitor_sections:
+                raise DriverError("This driver does not support that monitoring section.")
+            if switch.driver == "netgear_gs108tv2" and len(payload.get("change_ids", [])) > 1:
+                raise DriverError("NETGEAR combined commits are unavailable. Preview and commit one staged item at a time.")
+        except DriverError as error:
+            raise ValueError(str(error)) from None
         job = Job.objects.create(switch=switch, action=action, payload=payload, created_by=user)
         transaction.on_commit(lambda: publish_job(job.pk))
         transaction.on_commit(lambda: notify_switch(switch.pk))
     return job
+
+
+def queue_pending_changes(switch, action, user):
+    """Combine the ordered pending changes into one candidate transaction."""
+    if action not in {"preview", "apply"}:
+        raise ValueError("Choose preview or commit.")
+    with transaction.atomic():
+        device = Switch.objects.select_for_update().get(pk=switch.pk)
+        if not can_access(user, device, "operator"):
+            raise ValueError("You do not have permission for this operation.")
+        if device.driver == "netgear_gs108tv2":
+            raise ValueError("NETGEAR has no atomic commit-all. Preview and commit one staged item at a time.")
+        changes = list(device.changes.select_for_update().filter(status="pending").order_by("pk"))
+        if not changes:
+            raise ValueError("There are no pending changes.")
+        latest = device.revisions.first()
+        if not latest or any(change.base_revision_id != latest.pk for change in changes):
+            raise ValueError("Staged changes have different or outdated baselines. Synchronize and restage them before combining.")
+        from .drivers.validation import config_commands
+        from .drivers.base import DriverError
+        try:
+            config_commands([line for change in changes for line in change.commands.splitlines()])
+        except DriverError as error:
+            raise ValueError(str(error)) from None
+        ConfigChange.objects.filter(pk__in=[change.pk for change in changes]).update(status=f"{action}ing")
+        return queue_job(device, action, {"change_ids": [change.pk for change in changes]}, user)
+
+
+def discard_pending_changes(switch, user):
+    with transaction.atomic():
+        device = Switch.objects.select_for_update().get(pk=switch.pk)
+        if not can_access(user, device, "operator"):
+            raise ValueError("You do not have permission to discard changes.")
+        if not device.changes.filter(status="pending").update(status="discarded"):
+            raise ValueError("There are no pending changes.")
+        transaction.on_commit(lambda: notify_switch(device.pk))
 
 
 def command_lines(commands):
@@ -90,15 +149,19 @@ def command_lines(commands):
     return lines
 
 
-def stage_change(switch, commands, user):
+def stage_change(switch, commands, user, reason=""):
     if not can_access(user, switch, "operator"):
         raise ValueError("You do not have permission to configure this switch.")
+    if switch.driver == "netgear_gs108tv2":
+        raise ValueError("NETGEAR has no CLI. Use its current-state graphical editors.")
     lines = command_lines(commands)
+    if not isinstance(reason, str) or len(reason) > 200:
+        raise ValueError("The change reason must be at most 200 characters.")
     revision = switch.revisions.first()
     if revision is None:
         raise ValueError("Synchronize the switch before staging configuration.")
     change = ConfigChange.objects.create(
-        switch=switch, base_revision=revision, commands="\n".join(lines), created_by=user,
+        switch=switch, base_revision=revision, commands="\n".join(lines), created_by=user, reason=reason,
     )
     transaction.on_commit(lambda: notify_switch(switch.pk))
     return change
@@ -107,7 +170,7 @@ def stage_change(switch, commands, user):
 def discard_change(change, user):
     if not can_access(user, change.switch, "operator"):
         raise ValueError("You do not have permission to discard this change.")
-    if not ConfigChange.objects.filter(pk=change.pk, status="pending").update(status="discarded"):
+    if not ConfigChange.objects.filter(pk=change.pk, status__in=["pending", "uncertain"]).update(status="discarded"):
         raise ValueError("Only pending changes can be discarded.")
     transaction.on_commit(lambda: notify_switch(change.switch_id))
 
@@ -144,25 +207,24 @@ def record_revision(switch, config, source="poll", user=None):
 def validate_network(value):
     try:
         network = ipaddress.ip_network(value, strict=True)
-        approved = [ipaddress.ip_network(item, strict=True) for item in settings.DISCOVERY_NETWORKS]
     except ValueError:
         raise ValueError("Enter a valid network CIDR.") from None
     if network.num_addresses > 256:
         raise ValueError("Discovery is limited to 256 addresses per run.")
-    if not any(network.version == item.version and network.subnet_of(item) for item in approved):
-        raise ValueError("This network is not in DISCOVERY_NETWORKS.")
     return network
 
 
-def queue_discovery(network, driver, port, username, credential_env, user):
+def queue_discovery(network, driver, port, username, credential_env, user, credential=None):
     if not user.is_active or not user.has_perm("switches.discover_switches"):
         raise ValueError("You do not have permission to discover switches.")
     subnet = validate_network(network)
     if driver not in settings.SWITCH_DRIVERS:
         raise ValueError("Select a registered driver.")
+    if not credential and bool(username) != bool(credential_env):
+        raise ValueError("Supply both username and credential reference, or neither.")
     run = DiscoveryRun(
         network=str(subnet), driver=driver, port=port, username=username,
-        credential_env=credential_env, created_by=user,
+        credential_env=credential_env, credential=credential, created_by=user,
     )
     run.full_clean()
     with transaction.atomic():
@@ -177,4 +239,9 @@ def publish_discovery(run_id):
     try:
         discover_switches.delay(run_id)
     except Exception:
-        DiscoveryRun.objects.filter(pk=run_id, status="queued").update(status="failed")
+        logger.error("Could not publish discovery run %s to the broker.", run_id)
+        DiscoveryRun.objects.filter(pk=run_id, status="queued").update(
+            status="failed",
+            error="Could not queue discovery. Check that Redis is running and REDIS_URL is correct, then submit a new scan.",
+        )
+        notify_live("discovery")

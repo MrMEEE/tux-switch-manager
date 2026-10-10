@@ -1,5 +1,6 @@
 import difflib
 import json
+import logging
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
@@ -8,18 +9,20 @@ from django.db import transaction
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
+from django.urls import reverse
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from . import services
-from .forms import BUILDERS, CONFIG_SECTION_CHOICES, ChangeForm, DeleteForm, DiagnosticForm, DiscoveryForm, MonitorForm, SECTION_CHOICES, SwitchForm
-from .models import ConfigChange, ConfigRevision, DiscoveryRun, Job, Switch, SwitchAccess
+from .forms import BUILDERS, CONFIG_SECTION_CHOICES, ChangeForm, CredentialForm, DeleteForm, DiagnosticForm, DiscoveryForm, MonitorForm, SECTION_CHOICES, SwitchForm
+from .models import ConfigChange, ConfigRevision, Credential, DiscoveryRun, Job, Switch, SwitchAccess
 from .permissions import can_access, visible_switches
 
 
 READ_ACTIONS = {action for action, role in services.ACTION_ROLES.items() if role == "viewer"}
 OPERATIONAL_SECTIONS = services.PUBLIC_MONITOR_SECTIONS
 VIEWER_SNAPSHOT_KEYS = OPERATIONAL_SECTIONS | {"facts", "snmp_interfaces", "snmp_error"}
+logger = logging.getLogger(__name__)
 
 
 def viewer_job(job):
@@ -39,6 +42,13 @@ def device_for(request, pk, role="viewer"):
 
 
 def detail_context(request, switch):
+    from .drivers.registry import driver_class
+    from .drivers.base import DriverError
+    try:
+        registered = driver_class(switch.driver)
+        capabilities = registered.capabilities
+    except DriverError:
+        capabilities = frozenset()
     operator = can_access(request.user, switch, "operator")
     jobs = switch.jobs.all()
     if not operator:
@@ -46,14 +56,81 @@ def detail_context(request, switch):
     snapshot = switch.snapshot
     if not operator:
         snapshot = {key: value for key, value in snapshot.items() if key in VIEWER_SNAPSHOT_KEYS} if isinstance(snapshot, dict) else {}
-    return {
+    context = {
         "switch": switch, "operator": operator,
         "device_admin": can_access(request.user, switch, "admin"),
         "snapshot_text": json.dumps(snapshot, indent=2, ensure_ascii=False),
         "jobs": list(jobs[:30]) if operator else [job for job in jobs[:100] if viewer_job(job)][:30],
         "revisions": switch.revisions.all()[:30] if operator else [],
         "changes": switch.changes.exclude(status__in=["discarded", "committed"])[:20] if operator else [],
+        "web_driver": switch.driver == "netgear_gs108tv2",
+        "supports_cli": "run_command" in capabilities,
+        "supports_diagnostics": "diagnostic" in capabilities,
+        "supports_restore": "restore" in capabilities,
     }
+    if operator:
+        from .configuration import SECTIONS, current_state
+        if context["web_driver"]:
+            from .netgear_configuration import SECTIONS
+        from .drivers.base import DriverError
+        try:
+            revision, state = current_state(switch)
+            context["configuration_sections"] = [
+                {"slug": slug, "label": label, "rows": state[slug]} for slug, label in SECTIONS.items()
+            ]
+            context["configuration_revision"] = revision
+        except DriverError as error:
+            context["configuration_error"] = str(error)
+    return context
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+@never_cache
+def configuration_editor(request, pk, section):
+    from .configuration import SECTIONS, EditorForm, current_state, stage_editor
+    from .drivers.base import DriverError
+
+    switch = device_for(request, pk, "operator")
+    if switch.driver == "netgear_gs108tv2":
+        from .netgear_configuration import SECTIONS, EditorForm, current_state, stage_editor
+    if section not in SECTIONS:
+        raise PermissionDenied
+    try:
+        revision, state = current_state(switch)
+    except DriverError as error:
+        messages.error(request, str(error))
+        return redirect("switch-detail", pk=pk)
+    key = request.GET.get("item")
+    row = next((item for item in state[section] if item["key"] == key), None)
+    if key and row is None:
+        messages.error(request, "This configuration item no longer exists. Reopen the editor.")
+        return redirect("switch-detail", pk=pk)
+    if row and not row["editable"]:
+        messages.error(request, "This item includes advanced settings that cannot be safely edited here. Use Advanced.")
+        return redirect("switch-detail", pk=pk)
+    try:
+        form = EditorForm(section, state, row, request.POST if request.method == "POST" else None,
+                          revision.pk, request.GET.get("kind", "ntp"))
+    except DriverError as error:
+        messages.error(request, str(error))
+        return redirect("switch-detail", pk=pk)
+    if request.method == "POST" and form.is_valid():
+        try:
+            if form.cleaned_data["revision"] != revision.pk:
+                raise DriverError("Configuration changed since this editor was opened. Reload before saving.")
+            if form.cleaned_data.get("operation") == "delete" and not request.POST.get("confirm_delete"):
+                raise DriverError("Confirm deletion before staging this change.")
+            change = stage_editor(switch, form, request.user)
+            messages.success(request, f"Change #{change.pk} staged. Review and commit it when ready.")
+            return redirect(f"{reverse('switch-detail', args=[pk])}#configuration-review")
+        except DriverError as error:
+            form.add_error(None, str(error))
+    return render(request, "switches/configuration_editor.html", {
+        "switch": switch, "form": form, "section": section, "label": SECTIONS[section], "item": row,
+        "revision": revision, "deletable": row and "operation" in form.fields,
+        "web_driver": switch.driver == "netgear_gs108tv2",
+    })
 
 
 @login_required
@@ -110,8 +187,10 @@ def detail(request, pk):
         change_form=ChangeForm(), delete_form=DeleteForm(), monitor_form=MonitorForm(),
         diagnostic_form=DiagnosticForm(allow_show=context["operator"]),
         sections=SECTION_CHOICES + CONFIG_SECTION_CHOICES if context["operator"] else [(value, label) for value, label in SECTION_CHOICES if value in OPERATIONAL_SECTIONS],
-        builders=[(section, form(prefix=section)) for section, form in BUILDERS.items()] if context["operator"] else [],
     )
+    context["change_form"].fields.pop("immediate")
+    if context["web_driver"]:
+        context["sections"] = [(value, label) for value, label in SECTION_CHOICES if value in {"system", "interfaces", "vlans"}]
     return render(request, "switches/detail.html", context)
 
 
@@ -149,7 +228,11 @@ def action(request, pk):
             messages.error(request, "Enter a valid command or target.")
             return redirect("switch-detail", pk=pk)
         payload = {"command" if action == "show" else "target": form.cleaned_data["value"]}
+        if action == "ping" and form.cleaned_data["count"] is not None:
+            payload["count"] = form.cleaned_data["count"]
         if action == "show":
+            if form.cleaned_data["reason"]:
+                payload["reason"] = form.cleaned_data["reason"]
             action = "command"
     elif action not in {"sync", "reboot"}:
         raise PermissionDenied
@@ -177,10 +260,8 @@ def stage(request, pk):
             commands = "\n".join(
                 get_driver(switch).build_change(getattr(form, "driver_section", section), form.values())
             ) if section else form.cleaned_data["commands"]
-            change = services.stage_change(switch, commands, request.user)
-            if form.cleaned_data["immediate"]:
-                services.queue_change(change, action="apply", user=request.user)
-            messages.success(request, "Change staged." + (" Apply queued." if form.cleaned_data["immediate"] else " Preview before committing."))
+            services.stage_change(switch, commands, request.user, reason=form.cleaned_data.get("reason", ""))
+            messages.success(request, "Change staged. Preview before committing.")
             return redirect("switch-detail", pk=pk)
         except (ValueError, DriverError) as exc:
             form.add_error(None, str(exc))
@@ -207,6 +288,25 @@ def change_action(request, pk, change_id):
 
 
 @login_required
+@require_POST
+def pending_action(request, pk):
+    switch = device_for(request, pk, "operator")
+    action = request.POST.get("action")
+    if action not in {"preview", "apply", "discard"}:
+        raise PermissionDenied
+    try:
+        if action == "discard":
+            services.discard_pending_changes(switch, request.user)
+            messages.success(request, "All pending changes discarded.")
+        else:
+            services.queue_pending_changes(switch, action, request.user)
+            messages.success(request, "Combined pending-change operation queued. See job output for results.")
+    except ValueError as error:
+        messages.error(request, str(error))
+    return redirect(f"{reverse('switch-detail', args=[pk])}#configuration-review")
+
+
+@login_required
 @require_GET
 @never_cache
 def revision(request, pk, revision_id):
@@ -219,7 +319,10 @@ def revision(request, pk, revision_id):
         fromfile=f"Revision {previous.pk}" if previous else "Empty",
         tofile=f"Revision {revision.pk}",
     ))
-    return render(request, "switches/revision.html", {"switch": switch, "revision": revision, "diff": diff})
+    return render(request, "switches/revision.html", {
+        "switch": switch, "revision": revision, "diff": diff,
+        "supports_restore": detail_context(request, switch)["supports_restore"],
+    })
 
 
 @login_required
@@ -254,10 +357,85 @@ def discovery(request):
     form = DiscoveryForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
         try:
-            services.queue_discovery(user=request.user, **form.cleaned_data)
-            messages.success(request, "Bounded discovery queued.")
+            run = services.queue_discovery(user=request.user, username="", credential_env="", **form.cleaned_data)
+            run.refresh_from_db(fields=["status", "error"])
+            if run.status == "failed":
+                messages.error(request, run.error or "Discovery failed to queue. Check Redis and worker logs.")
+            else:
+                messages.success(request, "Bounded discovery queued.")
             return redirect("discovery")
         except ValueError as exc:
             form.add_error(None, str(exc))
     runs = DiscoveryRun.objects.all() if request.user.is_superuser else DiscoveryRun.objects.filter(created_by=request.user)
-    return render(request, "switches/discovery.html", {"form": form, "runs": runs[:20]})
+    return render(request, "switches/discovery.html", {
+        "form": form, "runs": runs.order_by("-created_at", "-pk")[:20], "credentials": Credential.objects.defer("password"),
+    })
+
+
+@login_required
+@require_POST
+@never_cache
+def confirm_candidate(request, run_id):
+    if not request.user.has_perm("switches.discover_switches"):
+        raise PermissionDenied
+    runs = DiscoveryRun.objects.all() if request.user.is_superuser else DiscoveryRun.objects.filter(created_by=request.user)
+    run = get_object_or_404(runs, pk=run_id)
+    address = request.POST.get("address")
+    if not any(item.get("address") == address and item.get("status") == "candidate" for item in run.results):
+        raise PermissionDenied
+    data = request.POST.copy()
+    data["network"] = f"{address}/{'128' if ':' in address else '32'}"
+    data["driver"] = run.driver
+    data["port"] = request.POST.get("port", run.port)
+    form = DiscoveryForm(data)
+    if form.is_valid() and form.cleaned_data.get("credential"):
+        from .drivers.base import DriverError
+        from .enrollment import verify_candidate
+
+        try:
+            result = verify_candidate(
+                run, address, form.cleaned_data["credential"], form.cleaned_data["port"],
+                request.user, request.session.session_key, request.POST.get("trust_token", ""),
+            )
+            return JsonResponse(result)
+        except DriverError as error:
+            logger.warning("Candidate verification failed for run %s: %s", run.pk, error)
+            return JsonResponse({"status": "error", "message": str(error)}, status=400)
+        except PermissionDenied:
+            raise
+        except Exception as error:
+            logger.error("Candidate verification failed for run %s (%s).", run.pk, type(error).__name__)
+            return JsonResponse({
+                "status": "error", "message": "Unexpected verification failure. Check the application logs.",
+            }, status=500)
+    return JsonResponse({
+        "status": "error", "message": "Select an available credential and a valid SSH/NETCONF port.",
+    }, status=400)
+
+
+@login_required
+@require_GET
+@never_cache
+def credentials(request):
+    if not request.user.has_perm("switches.manage_credentials"):
+        raise PermissionDenied
+    return render(request, "switches/credentials.html", {
+        "credentials": Credential.objects.defer("password"),
+    })
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+@never_cache
+def credential_edit(request, pk=None):
+    if not request.user.has_perm("switches.manage_credentials"):
+        raise PermissionDenied
+    credential = get_object_or_404(Credential, pk=pk) if pk else None
+    form = CredentialForm(request.POST or None, instance=credential)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        messages.success(request, "Credential saved securely.")
+        return redirect("credentials")
+    return render(request, "switches/form.html", {
+        "form": form, "title": "Edit credential" if pk else "Add credential",
+    })

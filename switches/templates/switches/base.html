@@ -1,9 +1,42 @@
 {% load static %}<!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{% block title %}Tux Switch Manager{% endblock %}</title><link rel="stylesheet" href="{% static 'switches/app.css' %}"><script defer src="{% static 'switches/app.js' %}"></script></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}Tux Switch Manager{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'switches/app.css' %}">
+  <script defer src="{% static 'switches/app.js' %}"></script>
+</head>
 <body>
-<header><a class="brand" href="{% url 'dashboard' %}"><span class="brand-icon">⇄</span> TUX <span>Switch Manager</span></a>
-{% if user.is_authenticated %}<nav><a href="{% url 'dashboard' %}">Fleet</a>{% if perms.switches.discover_switches %}<a href="{% url 'discovery' %}">Discovery</a>{% endif %}{% if user.is_staff %}<a href="{% url 'admin:index' %}">Administration</a>{% endif %}<span class="user">{{ user.username }}</span><form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="quiet">Sign out</button></form></nav>{% endif %}</header>
-<main>{% for message in messages %}<div class="notice {{ message.tags }}" role="status">{{ message }}</div>{% endfor %}{% block content %}{% endblock %}</main>
-<footer>Tux Switch Manager · Secure operations, deliberate changes</footer>
-</body></html>
+<a class="skip-link" href="#main-content">Skip to content</a>
+<div class="app-shell">
+  <aside class="sidebar" id="sidebar">
+    <a class="brand" href="{% url 'dashboard' %}"><span class="tux-green">Tux</span>Switch<span class="brand-caption">MANAGER</span></a>
+    <p class="sidebar-label">WORKSPACE</p>
+    {% if user.is_authenticated %}
+    <nav class="sidebar-nav" aria-label="Main navigation">
+      <a href="{% url 'dashboard' %}"{% if request.resolver_match.url_name != 'discovery' and request.resolver_match.url_name != 'credentials' and request.resolver_match.url_name != 'credential-add' and request.resolver_match.url_name != 'credential-edit' and request.resolver_match.namespace != 'admin' %} class="active" aria-current="page"{% endif %}><span class="nav-icon" aria-hidden="true">⇄</span> Fleet</a>
+      {% if perms.switches.discover_switches %}<a href="{% url 'discovery' %}"{% if request.resolver_match.url_name == 'discovery' %} class="active" aria-current="page"{% endif %}><span class="nav-icon" aria-hidden="true">⌕</span> Discovery</a>{% endif %}
+      {% if perms.switches.manage_credentials %}<a href="{% url 'credentials' %}"{% if request.resolver_match.url_name == 'credentials' or request.resolver_match.url_name == 'credential-add' or request.resolver_match.url_name == 'credential-edit' %} class="active" aria-current="page"{% endif %}><span class="nav-icon" aria-hidden="true">⚿</span> Credentials</a>{% endif %}
+      {% if user.is_staff %}<a href="{% url 'admin:index' %}"><span class="nav-icon" aria-hidden="true">⚙</span> Administration</a>{% endif %}
+    </nav>
+    {% else %}<p class="sidebar-description">Your network.<br>Your control.</p>{% endif %}
+    <div class="sidebar-bottom"><span class="status-dot" aria-hidden="true"></span> Network management</div>
+  </aside>
+  <div class="workspace">
+    <header class="top-header">
+      <div class="header-title"><button class="quiet menu-toggle" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Toggle navigation">☰</button><span>Switch Manager <span class="header-divider">/</span> Workspace</span></div>
+      {% if user.is_authenticated %}<div class="account"><span id="live-status" class="muted" aria-live="polite"></span><span class="avatar" aria-hidden="true">{{ user.username|slice:":1"|upper }}</span><span class="user">{{ user.username }}</span><form method="post" action="{% url 'logout' %}">{% csrf_token %}<button class="quiet">Sign out</button></form></div>{% endif %}
+    </header>
+    <main id="main-content">{% for message in messages %}<div class="notice {{ message.tags }}" role="status">{{ message }}</div>{% endfor %}{% block content %}{% endblock %}</main>
+    <footer>Tux Switch Manager <span>Secure operations, deliberate changes</span></footer>
+  </div>
+</div>
+<dialog id="host-key-dialog" aria-labelledby="host-key-title">
+  <h2 id="host-key-title">Trust this switch's SSH host key?</h2>
+  <p>The switch presented an unknown key. Compare this fingerprint with a trusted source before approving. A matching key will be saved only after credentials and device verification succeed.</p>
+  <dl><dt>Switch</dt><dd data-host-key="address"></dd><dt>Key type</dt><dd data-host-key="algorithm"></dd><dt>SHA-256 fingerprint</dt><dd class="mono" data-host-key="fingerprint"></dd></dl>
+  <form method="dialog" class="actions"><button value="cancel" class="quiet" autofocus>Cancel</button><button value="trust">Trust and add</button></form>
+</dialog>
+</body>
+</html>
