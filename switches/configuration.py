@@ -279,6 +279,9 @@ def rows_from_xml(xml):
 
 
 def current_state(switch):
+    if switch.driver == "hp_comware":
+        from .comware_configuration import current_state as comware_state
+        return comware_state(switch)
     if switch.driver == "netgear_plus":
         from .netgear_plus_configuration import current_state as plus_state
         return plus_state(switch)

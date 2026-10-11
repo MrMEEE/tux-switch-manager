@@ -156,6 +156,8 @@ def stage_change(switch, commands, user, reason=""):
         raise ValueError("You do not have permission to configure this switch.")
     if switch.driver in {"netgear_gs108tv2", "netgear_plus"}:
         raise ValueError("NETGEAR has no CLI. Use its current-state graphical editors.")
+    if switch.driver == "hp_comware":
+        raise ValueError("Use the Comware current-state graphical editors; Junos set/delete syntax is not supported.")
     lines = command_lines(commands)
     if not isinstance(reason, str) or len(reason) > 200:
         raise ValueError("The change reason must be at most 200 characters.")

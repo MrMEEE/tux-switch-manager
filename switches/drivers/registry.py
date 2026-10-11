@@ -13,6 +13,7 @@ DEFAULT_DRIVERS = {
     "juniper_ex": "switches.drivers.juniper.JuniperEXDriver",
     "netgear_gs108tv2": "switches.drivers.netgear.NetgearGS108Tv2Driver",
     "netgear_plus": "switches.drivers.netgear_plus.NetgearPlusDriver",
+    "hp_comware": "switches.drivers.comware.ComwareDriver",
 }
 
 

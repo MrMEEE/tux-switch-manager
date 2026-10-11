@@ -41,6 +41,45 @@ driver targets Juniper EX3300-24P and EX3300-48P, including older non-ELS Junos.
 - A responsive dark workspace matching TuxCMDB's sidebar, blue accents and green
   Tux branding, with collapsible navigation and locally served theme assets.
 
+## HP V1910 / Comware 5 (experimental SSH2)
+
+Choose **HP V1910 / Comware 5 (SSH2, live unverified)** (`hp_comware`), port
+**22**, with a saved username/password credential. Discovery and manual
+automatic matching recommend it from a V1910 model or Comware 5.20 banner;
+authenticated collection still requires a matching V1910 model and Comware 5.
+It is not a generic Aruba/Comware profile.
+
+**Live compatibility remains unverified.** The reference HP V1910-24G-PoE
+(365W), JE007A, running 5.20 Release 1108P01 at `192.168.60.2`, rejected SSH
+version negotiation before authentication. An `SSH-1.99` banner does not prove
+SSH1-only support. If SSH is unavailable, enable SSH and account access using
+the vendor documentation. If SSH2 negotiation fails, check SSH settings and
+upgrade to firmware supporting SSH2 for the exact model. The app does not
+upgrade firmware or fall back to SSH1/Telnet.
+
+Unknown SSH host keys use the existing fingerprint-approval dialog; changed
+keys fail closed. Full authorized CLI access is required. A restricted shell
+gets an explicit error; the app never uses undocumented CLI unlock passwords.
+
+The profile provides configuration/facts collection and CLI monitoring for
+interfaces, VLANs, ARP, MAC, LLDP, PoE, STP and routes where firmware/account
+permissions allow it. GUI editors prefill system name, existing VLAN
+descriptions, physical-port descriptions/admin state and safely represented
+access/trunk membership/PVID. Advanced/hybrid/LAG switching is preserved and
+not editable. VLAN creation/deletion, LAG editing, management addresses,
+arbitrary CLI, reboot, restoration and commit-all are unavailable. Unsupported
+or ambiguous layouts fail explicitly, including multiline banners.
+
+Changes stay locally staged until review and explicit commit. Writes are
+immediate, sequential and **non-atomic**, with no remote lock or rollback.
+Fresh full-configuration comparison guards stale baselines and full readback
+checks the plan; unrelated command order is preserved. A failed or expired
+apply remains **uncertain**, with no automatic retry. Inspect the native CLI,
+synchronize and restage deliberately. Startup configuration is not saved.
+Port/admin/VLAN changes can disconnect management; use a maintenance window.
+No new SSH dependency is needed: the profile uses the existing Paramiko SSH2
+client. Fixture tests are not a substitute for post-upgrade live verification.
+
 ## Web-only NETGEAR GS108Tv2
 
 Choose **NETGEAR GS108Tv2 (legacy web GUI)** (`netgear_gs108tv2`) in inventory or discovery and

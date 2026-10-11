@@ -100,7 +100,7 @@ def stage_managed_editor(switch, form, user, slug, read_state):
             raise DriverError("This device or your configuration permission changed. Reopen the editor.")
         revision, _ = read_state(device)
         if revision.pk != form.cleaned_data["revision"]:
-            raise DriverError("NETGEAR baseline changed. Reload before saving.")
+            raise DriverError("Device baseline changed. Reload before saving.")
         change = ConfigChange.objects.create(switch=device, base_revision=revision, commands=line, created_by=user)
         transaction.on_commit(lambda: notify_switch(device.pk))
         return change

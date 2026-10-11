@@ -115,8 +115,10 @@ class SwitchForm(forms.ModelForm):
         if cleaned.get("port") is None:
             from .profiles import default_port
             cleaned["port"] = default_port(cleaned.get("driver"))
-        if cleaned.get("driver") == "juniper_ex" and cleaned.get("credential") and not cleaned["credential"].username:
-            self.add_error("credential", "The SSH driver requires a credential with a username.")
+        if cleaned.get("driver") and cleaned["driver"] != "auto" and cleaned.get("credential"):
+            from .drivers.registry import driver_class
+            if driver_class(cleaned["driver"]).requires_username and not cleaned["credential"].username:
+                self.add_error("credential", "The SSH driver requires a credential with a username.")
         if not cleaned.get("credential") and not (
             self.instance.pk and self.instance.username and self.instance.credential_env
         ):
@@ -439,6 +441,8 @@ class DiscoveryForm(forms.Form):
         if cleaned.get("port") is None:
             from .profiles import default_port
             cleaned["port"] = default_port(cleaned.get("driver"))
-        if cleaned.get("driver") == "juniper_ex" and cleaned.get("credential") and not cleaned["credential"].username:
-            self.add_error("credential", "The SSH driver requires a credential with a username.")
+        if cleaned.get("driver") and cleaned["driver"] != "auto" and cleaned.get("credential"):
+            from .drivers.registry import driver_class
+            if driver_class(cleaned["driver"]).requires_username and not cleaned["credential"].username:
+                self.add_error("credential", "The SSH driver requires a credential with a username.")
         return cleaned

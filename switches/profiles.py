@@ -37,6 +37,8 @@ def annotate(candidate):
         if model is None or model.group().lower() in {"ex3300-24p", "ex3300-48p"}:
             slug = "juniper_ex"
             known_model = model is not None
+    elif re.search(r"\bV1910-(?:8|16|24|48)G(?:-PoE)?\b", evidence, re.I) or re.search(r"\bComware[- ]5\.20\b", evidence, re.I):
+        slug = "hp_comware"
     if slug not in settings.SWITCH_DRIVERS:
         slug = ""
     candidate["profile"] = slug
@@ -47,9 +49,13 @@ def annotate(candidate):
         else "No matching supported profile"
     )
     candidate["supported"] = bool(slug)
+    if slug == "hp_comware":
+        candidate["support"] = "Experimental SSH2 profile — V1910 model and CLI access must be verified; live compatibility unverified"
+        if "open_ports" in candidate and 22 not in candidate["open_ports"]:
+            candidate["support"] += ". SSH was not found on port 22: enable SSH on the switch and allow SSH access for the account"
     candidate["profile_label"] = driver_class(slug).profile_label if slug else ""
     ports = candidate.get("open_ports", [])
-    candidate["profile_port"] = (80 if slug and driver_class(slug).transport == "http" else 830 if 830 in ports else 22)
+    candidate["profile_port"] = (80 if slug and driver_class(slug).transport == "http" else 830 if slug == "juniper_ex" and 830 in ports else 22)
     return candidate
 
 

@@ -65,6 +65,7 @@ def detail_context(request, switch):
         "revisions": switch.revisions.all()[:30] if operator else [],
         "changes": switch.changes.exclude(status__in=["discarded", "committed"])[:20] if operator else [],
         "web_driver": registered is not None and registered.transport == "http",
+        "managed_driver": switch.driver in {"netgear_gs108tv2", "netgear_plus", "hp_comware"},
         "web_configuration_warning": switch.snapshot.get("configuration_warning", "") if isinstance(switch.snapshot, dict) else "",
         "supports_cli": "run_command" in capabilities,
         "supports_diagnostics": "diagnostic" in capabilities,
@@ -83,6 +84,10 @@ def detail_context(request, switch):
         from .configuration import SECTIONS, current_state
         if context["web_driver"]:
             from .netgear_configuration import SECTIONS
+        if switch.driver == "hp_comware":
+            from .comware_configuration import SECTIONS
+            from .drivers.comware import WARNING
+            context["web_configuration_warning"] = WARNING
         from .drivers.base import DriverError
         try:
             if registered is None:
@@ -113,6 +118,8 @@ def configuration_editor(request, pk, section):
         from .netgear_configuration import SECTIONS, EditorForm, current_state, stage_editor
     elif switch.driver == "netgear_plus":
         from .netgear_plus_configuration import SECTIONS, EditorForm, current_state, stage_editor
+    elif switch.driver == "hp_comware":
+        from .comware_configuration import SECTIONS, EditorForm, current_state, stage_editor
     if section not in SECTIONS or section not in registered.configuration_sections:
         raise PermissionDenied
     try:
@@ -151,6 +158,7 @@ def configuration_editor(request, pk, section):
         "switch": switch, "form": form, "section": section, "label": SECTIONS[section], "item": row,
         "revision": revision, "deletable": row and "operation" in form.fields,
         "web_driver": registered.transport == "http",
+        "comware_driver": switch.driver == "hp_comware",
     })
 
 
