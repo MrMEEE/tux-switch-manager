@@ -341,6 +341,46 @@ class HTTPSTransportTests(UnitTestCase):
         self.assertEqual(open_request.call_args.kwargs["fingerprint"], "a" * 64)
         self.assertGreaterEqual(open_request.call_args.kwargs["context"].minimum_version, ssl.TLSVersion.TLSv1_2)
 
+    def test_https_device_rejection_is_explicit_without_exposing_arbitrary_error_text(self):
+        from .drivers.netgear import FormRejected
+        driver = NetgearGS108Tv2Driver("192.0.2.5", password="fixture-password")
+        self.addCleanup(driver.close)
+        driver.connected = True
+        driver.client = MagicMock()
+        import io
+        for message, expected in (
+            ("Error: Failed to set HTTPS Admin Mode.", "Failed to set HTTPS Admin Mode"),
+            ("untrusted device text fixture-password", "NETGEAR rejected the form"),
+        ):
+            from html import escape
+            raw = f'<input name="err_flag" value="1"><input name="err_msg" value="{escape(message)}">'
+            driver.client.open.return_value.__enter__.return_value = io.BytesIO(raw.encode())
+            with self.assertRaisesRegex(FormRejected, expected) as error:
+                driver._page("/base/system/https_cfg_rw.html", {"submt": "16"})
+            self.assertNotIn("fixture-password", str(error.exception))
+
+    def test_https_enable_rejection_and_failed_readback_are_distinguished(self):
+        from .drivers.netgear import FormRejected
+        driver = NetgearGS108Tv2Driver("192.0.2.5", password="fixture-password")
+        self.addCleanup(driver.close)
+        initial = Page("")
+        initial.fields = {"https_mode": "Disable", "ssl_version": "Disable", "tls_version": "Enable", "https_port": "443",
+                          "https_soft": "5", "https_hard": "24", "https_sessions": "2"}
+        for response, expected in (
+            (FormRejected("The switch rejected enabling HTTPS: Failed to set HTTPS Admin Mode."), "Certificate Download"),
+            (DriverError("network failure"), "uncertain because the request failed"),
+        ):
+            driver._page = Mock(side_effect=[initial, response])
+            with self.assertRaisesRegex(DriverError, expected):
+                driver.enable_https()
+            self.assertEqual(driver._page.call_count, 2)
+        driver._page = Mock(side_effect=[initial, Page(""), DriverError("expired")])
+        with self.assertRaisesRegex(DriverError, "uncertain because readback failed"):
+            driver.enable_https()
+        driver._page = Mock(side_effect=[initial, Page(""), initial])
+        with self.assertRaisesRegex(DriverError, "still disabled"):
+            driver.enable_https()
+
     def test_enabling_https_preserves_timeout_and_port_and_disables_sslv3(self):
         driver = NetgearGS108Tv2Driver("192.0.2.5", password="fake")
         self.addCleanup(driver.close)

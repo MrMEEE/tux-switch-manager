@@ -38,6 +38,8 @@ def vlan_numbers(row):
     values = row.get("vlan_id_list", "").split()
     if row.get("vlan_id"):
         values.append(str(row["vlan_id"]))
+    elif row.get("implicit_default") and not values:
+        values.append("1")
     numbers = set()
     for value in vlan_ranges(" ".join(values)):
         bounds = [int(number) for number in value.split("-")]
@@ -179,7 +181,10 @@ def clean_options(form, cleaned):
         try:
             ranges = vlan_ranges(cleaned.get("vlan_id_list", ""))
             cleaned["vlan_id_list"] = " ".join(ranges)
-            if bool(cleaned.get("vlan_id")) == bool(ranges):
+            implicit_default = bool(form.row and form.row.get("implicit_default"))
+            if bool(cleaned.get("vlan_id")) == bool(ranges) and not (
+                implicit_default and not cleaned.get("vlan_id") and not ranges
+            ):
                 form.add_error("vlan_id", "Choose either one VLAN ID or a VLAN ID list/range.")
         except DriverError as error:
             form.add_error("vlan_id_list", str(error))

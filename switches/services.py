@@ -154,7 +154,7 @@ def command_lines(commands):
 def stage_change(switch, commands, user, reason=""):
     if not can_access(user, switch, "operator"):
         raise ValueError("You do not have permission to configure this switch.")
-    if switch.driver == "netgear_gs108tv2":
+    if switch.driver in {"netgear_gs108tv2", "netgear_plus"}:
         raise ValueError("NETGEAR has no CLI. Use its current-state graphical editors.")
     lines = command_lines(commands)
     if not isinstance(reason, str) or len(reason) > 200:

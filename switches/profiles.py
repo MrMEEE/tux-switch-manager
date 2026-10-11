@@ -26,7 +26,9 @@ def annotate(candidate):
     if candidate.get("verified") and candidate.get("profile") in settings.SWITCH_DRIVERS:
         slug, known_model = candidate["profile"], True
     elif vendor == "NETGEAR" or re.search(r"\bnetgear\b", evidence, re.I):
-        if re.search(r"\bGS108Tv2\b", evidence, re.I):
+        if re.search(r"\bGS110EMX\b", evidence, re.I):
+            slug, known_model = "netgear_plus", True
+        elif re.search(r"\bGS108Tv2\b", evidence, re.I):
             slug, known_model = "netgear_gs108tv2", True
         elif re.search(r"\bGS108T\b", evidence, re.I):
             slug = "netgear_gs108tv2"
@@ -47,8 +49,12 @@ def annotate(candidate):
     candidate["supported"] = bool(slug)
     candidate["profile_label"] = driver_class(slug).profile_label if slug else ""
     ports = candidate.get("open_ports", [])
-    candidate["profile_port"] = (80 if slug == "netgear_gs108tv2" else 830 if 830 in ports else 22)
+    candidate["profile_port"] = (80 if slug and driver_class(slug).transport == "http" else 830 if 830 in ports else 22)
     return candidate
+
+
+def default_port(slug):
+    return 80 if slug and slug != AUTO and driver_class(slug).transport == "http" else 22
 
 
 def resolve(candidate):

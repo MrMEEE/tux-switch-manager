@@ -155,7 +155,7 @@ def poll_switches():
             ConfigChange.objects.filter(
                 pk__in=expired.payload.get("change_ids", [expired.payload.get("change_id")]), switch_id=expired.switch_id,
                 status=f"{expired.action}ing",
-            ).update(status="uncertain" if expired.action == "apply" and expired.switch.driver == "netgear_gs108tv2" else "pending")
+            ).update(status="uncertain" if expired.action == "apply" and expired.switch.driver in {"netgear_gs108tv2", "netgear_plus"} else "pending")
         notify_switch(expired.switch_id)
     for switch in Switch.objects.filter(active=True, monitoring_enabled=True).defer("snapshot"):
         with transaction.atomic():

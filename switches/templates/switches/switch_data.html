@@ -1,5 +1,4 @@
 <section class="panel"><h2>{{ switch.name }}</h2><p class="mono">{{ switch.address }}:{{ switch.port }} · {{ switch.model }}</p><p><span class="badge">{{ switch.status }}</span> · Last sync: {{ switch.last_synced|date:"M j, H:i"|default:"Never" }}</p><p class="muted">Automatic monitoring: {{ switch.monitoring_enabled|yesno:"Enabled,Disabled" }}</p>{% if switch.notes %}<p>{{ switch.notes|linebreaksbr }}</p>{% endif %}</section>
-{% include 'switches/workspace_actions.html' %}
 {% if web_driver %}
 <section class="panel"><h2>Web management transport: {{ switch.management_protocol|upper }}</h2>
 {% if https_offer %}<details open data-live-key="https-prompt"><summary>Enable HTTPS and use it instead?</summary><p class="notice">This connection sends the switch password over unencrypted HTTP. HTTPS setup is a device configuration write, not a staged edit. SSLv3 will be disabled when enabling HTTPS; the client requires TLS 1.2 or newer and will not downgrade. Older firmware may need upgrading.</p>
@@ -12,3 +11,4 @@
   {% include 'switches/configuration_data.html' %}
   {% include 'switches/live.html' %}
 </div>
+{% include 'switches/workspace_actions.html' %}

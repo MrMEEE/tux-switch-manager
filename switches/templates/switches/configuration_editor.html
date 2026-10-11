@@ -6,6 +6,7 @@
   <h1>{{ label }}{% if item %}: {{ item.key }}{% endif %}</h1>
   <p class="muted">Prefilled from synchronized revision #{{ revision.pk }}. Saving stages only the fields you change. Nothing is applied until you review and commit.</p>
   {% if web_driver %}<p class="notice">HTTP is unencrypted. Applying has no remote lock, atomic commit or rollback. Readback checks only managed fields, not startup persistence. Use Save Configuration in the device GUI after verifying the result. Management-port/VLAN edits can disconnect access.</p>{% endif %}
+  {% if item.implicit_default %}<p class="notice">This is Junos' implicit default VLAN. Leave VLAN ID blank to preserve it. Rename and deletion are unavailable here. Changing the routed management address or membership can disconnect the switch; changes remain staged until you commit.</p>{% endif %}
   {% if section == 'firewall' %}<p class="notice">IPv4 filter terms only. Editing preserves term order and unrelated rules. This editor does not attach filters to interfaces.</p>{% endif %}
   {% if section == 'lags' %}<p class="notice">New member attachments remove those ports' existing unit configuration. Removing members leaves them detached; configure their switching settings separately.</p>{% endif %}
   {% if form.initial.kind == 'snmp-community' %}<p class="notice">The community secret is hidden. Read-write access and unrestricted clients are risky: prefer read-only access restricted to a trusted management network.</p>{% endif %}

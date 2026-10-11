@@ -89,7 +89,7 @@ class SwitchForm(forms.ModelForm):
         if isinstance(credential_field, forms.ModelChoiceField):
             credential_field.queryset = Credential.objects.defer("password")
         self.fields["credential"].widget.attrs["data-live-url"] = "/ws/live/credential-options/"
-        self.fields["credential"].help_text = "Choose a saved credential. NETGEAR GS108Tv2 uses only its password, over unencrypted HTTP."
+        self.fields["credential"].help_text = "Choose a saved credential. NETGEAR web profiles use only the password; HTTP is unencrypted."
         if self.instance.pk and self.instance.username and self.instance.credential_env:
             self.fields["credential"].help_text += " Leave blank to retain this switch's existing legacy credentials."
         self.fields["snmp_credential_env"].help_text = "Optional SWITCH_CREDENTIAL_ environment variable for the read-only SNMPv2 community; never paste the community."
@@ -113,7 +113,8 @@ class SwitchForm(forms.ModelForm):
             except DriverError as error:
                 self.add_error("driver", str(error))
         if cleaned.get("port") is None:
-            cleaned["port"] = 80 if cleaned.get("driver") == "netgear_gs108tv2" else 22
+            from .profiles import default_port
+            cleaned["port"] = default_port(cleaned.get("driver"))
         if cleaned.get("driver") == "juniper_ex" and cleaned.get("credential") and not cleaned["credential"].username:
             self.add_error("credential", "The SSH driver requires a credential with a username.")
         if not cleaned.get("credential") and not (
@@ -135,7 +136,8 @@ class SwitchForm(forms.ModelForm):
             # Keep HTTPS verification strict when changing endpoints; do not
             # silently downgrade a previously HTTPS-managed device.
             device.tls_fingerprint = ""
-        if device.driver != "netgear_gs108tv2":
+        from .drivers.registry import driver_class
+        if driver_class(device.driver).transport != "http":
             device.management_protocol = "http"
             device.https_pending = {}
             device.tls_fingerprint = ""
@@ -435,7 +437,8 @@ class DiscoveryForm(forms.Form):
     def clean(self):
         cleaned = super().clean()
         if cleaned.get("port") is None:
-            cleaned["port"] = 80 if cleaned.get("driver") == "netgear_gs108tv2" else 22
+            from .profiles import default_port
+            cleaned["port"] = default_port(cleaned.get("driver"))
         if cleaned.get("driver") == "juniper_ex" and cleaned.get("credential") and not cleaned["credential"].username:
             self.add_error("credential", "The SSH driver requires a credential with a username.")
         return cleaned

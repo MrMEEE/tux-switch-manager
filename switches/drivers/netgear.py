@@ -46,6 +46,10 @@ class PartialApply(DriverError):
     """A write was attempted; its outcome must be reconciled before restaging."""
 
 
+class FormRejected(DriverError):
+    """The device explicitly rejected an HTTP form."""
+
+
 class Page(HTMLParser):
     """Extract form values and table cells, without executing device JavaScript."""
 
@@ -255,7 +259,9 @@ class NetgearGS108Tv2Driver(BaseDriver):
         if "pwd" in page.fields:
             raise DriverError("NETGEAR login failed or the session expired.")
         if page.fields.get("err_flag", "0") != "0":
-            raise DriverError("NETGEAR rejected the form. Check the switch GUI; no further writes were sent.")
+            if path == "/base/system/https_cfg_rw.html" and page.fields.get("err_msg", "").strip() == "Error: Failed to set HTTPS Admin Mode.":
+                raise FormRejected("The switch rejected enabling HTTPS: Failed to set HTTPS Admin Mode.")
+            raise FormRejected("NETGEAR rejected the form. Check the switch GUI; no further writes were sent.")
         return page
 
     def enable_https(self):
@@ -274,13 +280,34 @@ class NetgearGS108Tv2Driver(BaseDriver):
                            submt="16", cncel="", err_flag="0", err_msg="")
             try:
                 self._page("/base/system/https_cfg_rw.html", payload)
-                result = self._page("/base/system/https_cfg.html").require("https_mode")
-                if result.fields["https_mode"] != "Enable":
-                    raise DriverError("HTTPS enable readback failed.")
-            except DriverError:
+            except FormRejected as error:
+                logger.warning("NETGEAR HTTPS enable form was rejected.")
                 raise DriverError(
-                    "HTTPS enable outcome is uncertain. HTTP remains configured in the app. Inspect the device GUI before retrying."
+                    f"{error} HTTP remains configured in the app. "
+                    "Check certificate setup under Security / Access / HTTPS / Certificate Download "
+                    "and firmware support in the native GUI. The app requires TLS 1.2 or newer."
                 ) from None
+            except DriverError as error:
+                logger.warning("NETGEAR HTTPS enable request failed (%s).", type(error).__name__)
+                raise DriverError(
+                    "HTTPS enable outcome is uncertain because the request failed. HTTP remains configured "
+                    "in the app. Inspect the device GUI before retrying."
+                ) from None
+            try:
+                result = self._page("/base/system/https_cfg.html").require("https_mode")
+            except DriverError as error:
+                logger.warning("NETGEAR HTTPS enable readback failed (%s).", type(error).__name__)
+                raise DriverError(
+                    "HTTPS enable outcome is uncertain because readback failed. HTTP remains configured "
+                    "in the app. Inspect the device GUI before retrying."
+                ) from None
+            if result.fields["https_mode"] == "Disable":
+                raise DriverError(
+                    "HTTPS is still disabled after the enable request. HTTP remains configured in the app. "
+                    "Check certificate setup and firmware support in the native GUI; TLS 1.2 or newer is required."
+                )
+            if result.fields["https_mode"] != "Enable":
+                raise DriverError("HTTPS readback returned an unknown admin mode. HTTP remains configured in the app. Inspect the device GUI.")
         return int(port)
 
     def __enter__(self):

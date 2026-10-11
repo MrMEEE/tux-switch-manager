@@ -123,15 +123,17 @@ def rows_from_xml(xml):
     for node in root.findall("vlans/vlan"):
         name = leaf(node, "name")
         vlan_id = leaf(node, "vlan-id")
+        implicit_default = name == "default" and not vlan_id and not node.findall("vlan-id-list")
         data["vlans"].append({
             "key": name, "name": name, "vlan_id": leaf(node, "vlan-id"),
+            "implicit_default": implicit_default,
             "vlan_id_list": " ".join(item.text.strip() for item in node.findall("vlan-id-list") if item.text),
             "description": leaf(node, "description"), "aging_time": leaf(node, "mac-table-aging-time"),
             "filter_in": leaf(node, "filter/input"), "filter_out": leaf(node, "filter/output"),
             "l3_interface": leaf(node, "l3-interface"), "l3_addresses": [],
             "member_interfaces": [port["name"] for port in data["ports"] + data["lags"] if name in port["vlans"]],
             "editable": simple(node, {"name", "vlan-id", "vlan-id-list", "description", "mac-table-aging-time", "filter", "l3-interface"}) and
-                (vlan_id.isdigit() and 1 <= int(vlan_id) <= 4094 or bool(node.findall("vlan-id-list"))),
+                (implicit_default or vlan_id.isdigit() and 1 <= int(vlan_id) <= 4094 or bool(node.findall("vlan-id-list"))),
         })
         row = data["vlans"][-1]
         known_members = set(row["member_interfaces"])
@@ -277,6 +279,9 @@ def rows_from_xml(xml):
 
 
 def current_state(switch):
+    if switch.driver == "netgear_plus":
+        from .netgear_plus_configuration import current_state as plus_state
+        return plus_state(switch)
     if switch.driver == "netgear_gs108tv2":
         from .netgear_configuration import current_state as netgear_state
         return netgear_state(switch)
@@ -405,6 +410,10 @@ class EditorForm(forms.Form):
             assert isinstance(operation_field, forms.ChoiceField)
             operation_field.choices = [("save", "Save to staged changes")]
         add_fields(fields, section, state, row)
+        if section == "vlans" and row and row.get("implicit_default"):
+            fields.pop("operation", None)
+            fields.pop("new_name", None)
+            fields["vlan_id"].help_text = "Blank preserves Junos' implicit default VLAN ID (1). No explicit VLAN ID is written unless you enter one."
 
     def clean(self):
         cleaned = super().clean()
@@ -484,12 +493,14 @@ def build_commands(form):
                             "delete chassis aggregated-devices ethernet device-count")
     elif section == "vlans":
         name = validation.name(values["name"])
+        if old.get("implicit_default") and (deleting or values.get("new_name")):
+            raise DriverError("The implicit default VLAN cannot be deleted or renamed through this editor.")
         if deleting:
             if any(name in item["vlans"] for item in form.state["ports"] + form.state["lags"]):
                 raise DriverError("Remove this VLAN from its member ports before deleting it.")
             commands = validation.build_change("vlans", {"name": name, "operation": "delete"})
         else:
-            duplicate = next((item for item in form.state["vlans"] if item["name"] != name and str(item["vlan_id"]) == str(values["vlan_id"])), None)
+            duplicate = next((item for item in form.state["vlans"] if values.get("vlan_id") and item["name"] != name and str(item["vlan_id"]) == str(values["vlan_id"])), None)
             if duplicate:
                 raise DriverError("That VLAN ID is already assigned to another VLAN.")
             if values.get("vlan_id") and (not old.get("vlan_id") or int(old["vlan_id"]) != values["vlan_id"]):

@@ -113,6 +113,22 @@ class ConfigurationEditorTests(TestCase):
         self.assertNotContains(response, 'href="#configure-vlans"')
         self.assertNotContains(response, '<details class="configuration-section"')
 
+    def test_workspace_action_panels_are_at_the_bottom_in_http_and_live_views(self):
+        from django.test import RequestFactory
+        from .live import snapshot
+
+        SwitchAccess.objects.filter(switch=self.switch, user=self.user).update(role="admin")
+        request = RequestFactory().get("/")
+        request.user = self.user
+        http = self.client.get(reverse("switch-detail", args=[self.switch.pk])).content.decode()
+        live = snapshot(request, "switch", self.switch.pk)["html"]
+        for html in (http, live):
+            positions = [html.index(label) for label in (
+                "Configuration revisions", "Monitoring and diagnostics",
+                "Advanced · manual configuration", "Device administration",
+            )]
+            self.assertEqual(positions, sorted(positions))
+
     def test_port_changes_only_changed_leaves(self):
         form = self.valid_form("ports", "ge-0/0/0", {"mode": "trunk", "vlans": ["users", "voice"]})
         self.assertEqual(build_commands(form), [
@@ -124,6 +140,75 @@ class ConfigurationEditorTests(TestCase):
         ])
         self.assertEqual(build_commands(self.valid_form("ports", "ge-0/0/0", {"description": ""})),
                          ["delete interfaces ge-0/0/0 description"])
+
+    def implicit_default_state(self, extra=""):
+        xml = f"""<configuration><interfaces><interface><name>vlan</name>
+        <unit><name>0</name><family><inet><address><name>192.0.2.1/24</name></address></inet></family></unit>
+        </interface></interfaces><vlans><vlan><name>default</name><l3-interface>vlan.0</l3-interface>{extra}</vlan>
+        <vlan><name>users</name><vlan-id>10</vlan-id></vlan></vlans></configuration>"""
+        return xml, rows_from_xml(xml)
+
+    def default_vlan_form(self, state, **changes):
+        row = state["vlans"][0]
+        data = {**row, "revision": self.revision.pk, "member_mode": "access", **changes}
+        form = EditorForm("vlans", state, row, data, self.revision.pk)
+        self.assertTrue(form.is_valid(), form.errors)
+        return form
+
+    def test_implicit_default_vlan_is_editable_without_explicit_id(self):
+        _, state = self.implicit_default_state()
+        row = state["vlans"][0]
+        self.assertTrue(row["editable"])
+        self.assertTrue(row["implicit_default"])
+        self.assertEqual(row["l3_addresses"], ["192.0.2.1/24"])
+        form = self.default_vlan_form(state, description="Management")
+        self.assertNotIn("operation", form.fields)
+        self.assertNotIn("new_name", form.fields)
+        self.assertEqual(build_commands(form), ['set vlans default description "Management"'])
+
+    def test_default_vlan_address_edit_preserves_implicit_id_and_unrelated_settings(self):
+        _, state = self.implicit_default_state()
+        form = self.default_vlan_form(state, l3_addresses=[], l3_ipv4="192.0.2.2/24")
+        self.assertEqual(build_commands(form), [
+            "delete interfaces vlan unit 0 family inet address 192.0.2.1/24",
+            "set interfaces vlan unit 0 family inet address 192.0.2.2/24",
+        ])
+
+    def test_implicit_default_vlan_editor_and_staging_work_end_to_end(self):
+        xml, _ = self.implicit_default_state()
+        Switch.objects.filter(pk=self.switch.pk).update(snapshot={"config": "committed text", "config_xml": xml})
+        response = self.client.get(self.editor_url("vlans", "default"))
+        self.assertContains(response, "192.0.2.1/24")
+        self.assertContains(response, "Leave VLAN ID blank")
+        response = self.client.post(self.editor_url("vlans", "default"), {
+            "revision": self.revision.pk, "name": "default", "vlan_id": "", "vlan_id_list": "",
+            "l3_interface": "vlan.0", "l3_addresses": ["192.0.2.1/24"],
+            "description": "Management", "member_mode": "access",
+        })
+        self.assertEqual(response.status_code, 302)
+        change = ConfigChange.objects.get(switch=self.switch)
+        self.assertEqual(change.commands, 'set vlans default description "Management"')
+        self.assertEqual(change.status, "pending")
+
+    def test_nondefault_vlan_without_id_and_complex_default_still_guarded(self):
+        xml, _ = self.implicit_default_state()
+        state = rows_from_xml(xml.replace("<name>default</name>", "<name>no-id</name>"))
+        self.assertFalse(state["vlans"][0]["editable"])
+        _, state = self.implicit_default_state("<interface>ge-0/0/0.0</interface>")
+        self.assertFalse(state["vlans"][0]["editable"])
+
+    def test_default_vlan_implicit_id_participates_in_collision_checks(self):
+        from .configuration_options import vlan_numbers
+        _, state = self.implicit_default_state()
+        self.assertEqual(vlan_numbers(state["vlans"][0]), {1})
+        row = state["vlans"][1]
+        form = EditorForm("vlans", state, row, {
+            **row, "revision": self.revision.pk, "vlan_id": 1, "operation": "save",
+            "member_mode": "access",
+        }, self.revision.pk)
+        self.assertTrue(form.is_valid(), form.errors)
+        with self.assertRaisesRegex(DriverError, "already assigned"):
+            build_commands(form)
 
     def test_implicit_default_vlan_preserved_for_description_edit(self):
         state = rows_from_xml(CONFIG_XML.replace(

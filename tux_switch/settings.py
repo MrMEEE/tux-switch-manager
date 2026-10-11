@@ -171,4 +171,5 @@ DISCOVERY_OUI_FILE = os.environ.get("DISCOVERY_OUI_FILE", "/usr/share/ieee-data/
 SWITCH_DRIVERS = {
     "juniper_ex": "switches.drivers.juniper.JuniperEXDriver",
     "netgear_gs108tv2": "switches.drivers.netgear.NetgearGS108Tv2Driver",
+    "netgear_plus": "switches.drivers.netgear_plus.NetgearPlusDriver",
 }

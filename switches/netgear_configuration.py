@@ -89,12 +89,16 @@ class EditorForm(forms.Form):
 
 
 def stage_editor(switch, form, user):
+    return stage_managed_editor(switch, form, user, SLUG, current_state)
+
+
+def stage_managed_editor(switch, form, user, slug, read_state):
     line = form.command(form.cleaned_data)
     with transaction.atomic():
         device = Switch.objects.select_for_update().get(pk=switch.pk)
-        if device.driver != SLUG or not can_access(user, device, "operator"):
+        if device.driver != slug or not can_access(user, device, "operator"):
             raise DriverError("This device or your configuration permission changed. Reopen the editor.")
-        revision, _ = current_state(device)
+        revision, _ = read_state(device)
         if revision.pk != form.cleaned_data["revision"]:
             raise DriverError("NETGEAR baseline changed. Reload before saving.")
         change = ConfigChange.objects.create(switch=device, base_revision=revision, commands=line, created_by=user)

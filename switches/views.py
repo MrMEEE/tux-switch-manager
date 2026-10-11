@@ -64,7 +64,8 @@ def detail_context(request, switch):
         "jobs": list(jobs[:30]) if operator else [job for job in jobs[:100] if viewer_job(job)][:30],
         "revisions": switch.revisions.all()[:30] if operator else [],
         "changes": switch.changes.exclude(status__in=["discarded", "committed"])[:20] if operator else [],
-        "web_driver": switch.driver == "netgear_gs108tv2",
+        "web_driver": registered is not None and registered.transport == "http",
+        "web_configuration_warning": switch.snapshot.get("configuration_warning", "") if isinstance(switch.snapshot, dict) else "",
         "supports_cli": "run_command" in capabilities,
         "supports_diagnostics": "diagnostic" in capabilities,
         "supports_restore": "restore" in capabilities,
@@ -90,6 +91,7 @@ def detail_context(request, switch):
             context["configuration_sections"] = [
                 {"slug": slug, "label": label, "rows": state[slug], "can_add": slug in registered.configuration_add_sections}
                 for slug, label in SECTIONS.items() if slug in registered.configuration_sections
+                and slug in state.get("_supported_sections", registered.configuration_sections)
             ]
             context["configuration_revision"] = revision
         except DriverError as error:
@@ -109,6 +111,8 @@ def configuration_editor(request, pk, section):
     registered = driver_class(switch.driver)
     if switch.driver == "netgear_gs108tv2":
         from .netgear_configuration import SECTIONS, EditorForm, current_state, stage_editor
+    elif switch.driver == "netgear_plus":
+        from .netgear_plus_configuration import SECTIONS, EditorForm, current_state, stage_editor
     if section not in SECTIONS or section not in registered.configuration_sections:
         raise PermissionDenied
     try:
@@ -117,6 +121,8 @@ def configuration_editor(request, pk, section):
         messages.error(request, str(error))
         return redirect("switch-detail", pk=pk)
     key = request.GET.get("item")
+    if section not in state.get("_supported_sections", registered.configuration_sections):
+        raise PermissionDenied
     row = next((item for item in state[section] if item["key"] == key), None)
     if key and row is None:
         messages.error(request, "This configuration item no longer exists. Reopen the editor.")
@@ -144,7 +150,7 @@ def configuration_editor(request, pk, section):
     return render(request, "switches/configuration_editor.html", {
         "switch": switch, "form": form, "section": section, "label": SECTIONS[section], "item": row,
         "revision": revision, "deletable": row and "operation" in form.fields,
-        "web_driver": switch.driver == "netgear_gs108tv2",
+        "web_driver": registered.transport == "http",
     })
 
 
