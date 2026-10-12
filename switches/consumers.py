@@ -7,6 +7,8 @@ from django.conf import settings
 from django.contrib.auth import get_user
 from django.core.exceptions import PermissionDenied
 from django.http import HttpRequest
+from django.http import QueryDict
+from django.urls import Resolver404, resolve
 from django.middleware.csrf import CsrfViewMiddleware
 
 from .models import Switch
@@ -63,6 +65,12 @@ class LiveConsumer(AsyncJsonWebsocketConsumer):
         request.session = import_module(settings.SESSION_ENGINE).SessionStore(session_key=session_key)
         request.user = get_user(SimpleNamespace(session=request.session))
         request.COOKIES = self.scope.get("cookies", {})
+        request.GET = QueryDict(self.scope.get("query_string", b"").decode("utf-8", errors="replace"))
+        path = request.GET.get("path", "/")
+        try:
+            request.resolver_match = resolve(path if path.startswith("/") and len(path) <= 2048 else "/")
+        except Resolver404:
+            request.resolver_match = None
         CsrfViewMiddleware(lambda request: None).process_request(request)
         try:
             return snapshot(request, self.topic, self.pk)
@@ -102,6 +110,14 @@ class LiveConsumer(AsyncJsonWebsocketConsumer):
             "credential-options": {"credentials", "access"},
             "switch": {"switch", "job", "access"},
             "job": {"job", "switch", "access"},
+            "navigation": {"access"},
+            "account": {"access"},
+            "fleet-controls": {"access"},
+            "switch-heading": {"switch", "job", "access"},
+            "editor-state": {"switch", "job", "access"},
+            "revision": {"switch", "job", "access"},
+            "inventory-form": {"switch", "credentials", "access"},
+            "credential-form": {"credentials", "access"},
         }
         if event.get("resource") in resources.get(self.topic, set()):
             await self.send_snapshot()

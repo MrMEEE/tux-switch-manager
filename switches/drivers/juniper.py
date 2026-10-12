@@ -4,13 +4,14 @@ import math
 import base64
 import hashlib
 import re
+import shlex
 import socket
 import time
 import xml.etree.ElementTree as ET
 
 import paramiko
 
-from .base import BaseDriver, ConfigConflict, DriverError, UntrustedHostKey
+from .base import BaseDriver, ConfigConflict, DriverError, PartialApply, UntrustedHostKey
 from . import validation
 
 
@@ -18,6 +19,7 @@ NETCONF = "urn:ietf:params:xml:ns:netconf:base:1.0"
 NETCONF_CAPABILITY = "urn:ietf:params:netconf:base:1.0"
 DELIMITER = b"]]>]]>"
 MAX_REPLY = 16 * 1024 * 1024
+COMMIT_TIMEOUT = 120
 
 
 class TrustedHostPolicy(paramiko.RejectPolicy):
@@ -48,6 +50,38 @@ def _text(node, name):
     return "" if found is None else "".join(found.itertext())
 
 
+def _rpc_error_detail(error):
+    details = []
+    allowed = {
+        "error-type": {"transport", "rpc", "protocol", "application"},
+        "error-tag": {
+            "in-use", "invalid-value", "too-big", "missing-attribute", "bad-attribute",
+            "unknown-attribute", "missing-element", "bad-element", "unknown-element",
+            "unknown-namespace", "access-denied", "lock-denied", "resource-denied",
+            "rollback-failed", "data-exists", "data-missing", "operation-not-supported",
+            "operation-failed", "partial-operation", "malformed-message",
+        },
+        "error-severity": {"error", "warning"},
+    }
+    for field, values in allowed.items():
+        value = _text(error, field).strip()
+        if value in values:
+            details.append(f"{field}={value}")
+    message = _text(error, "error-message").lower()
+    if "syntax error" in message:
+        details.append("Syntax error: expected an identifier." if "expecting <identifier>" in message else "Syntax error.")
+    elif "permission denied" in message or "not authorized" in message:
+        details.append("Insufficient configuration permissions.")
+    elif "configuration check-out failed" in message:
+        details.append("Configuration validation failed.")
+    elif message:
+        details.append("Device message withheld because it may contain configuration or credentials.")
+    line = _text(error, "line-number").strip()
+    if re.fullmatch(r"[0-9]{1,6}", line):
+        details.append(f"configuration line={line}")
+    return "; ".join(details) or "No safe error details available."
+
+
 class JuniperEXDriver(BaseDriver):
     """Junos EX driver using the SSH ``netconf`` subsystem, never a shell.
 
@@ -60,7 +94,8 @@ class JuniperEXDriver(BaseDriver):
     get_config/restore use hierarchical Junos configuration text, not display-set
     commands. Preview/apply accept validated set/delete lists. Exclusive Junos
     candidate locking protects comparisons; existing uncommitted changes are
-    refused, not overwritten. RPC errors are sanitized, never echoed to callers.
+    refused, not overwritten. Transaction diagnostics retain RPC stages and
+    allowlisted error details, never raw device messages or configuration values.
     A transport failure during commit has an inherently uncertain outcome; fetch
     fresh configuration before retrying. No automatic commit retries are made.
 
@@ -140,6 +175,13 @@ class JuniperEXDriver(BaseDriver):
         self._channel = None
         self._buffer = b""
         self._message_id = 0
+        self.transaction_diagnostics = []
+        self._trace_transaction = False
+
+    def _trace(self, message):
+        if self._trace_transaction and len(self.transaction_diagnostics) < 100:
+            self.transaction_diagnostics.append(message)
+            self.report_progress(message)
 
     def __enter__(self):
         if self._client is not None:
@@ -261,22 +303,66 @@ class JuniperEXDriver(BaseDriver):
         message_id = str(self._message_id)
         rpc = _element(f"{{{NETCONF}}}rpc", **{"message-id": message_id})
         rpc.append(operation)
+        committing = _local(operation.tag) == "commit-configuration" and _find(operation, "check") is None
+        label = _local(operation.tag)
+        if self._trace_transaction:
+            label = label if label in {
+                "lock-configuration", "unlock-configuration", "get-configuration",
+                "load-configuration", "commit-configuration",
+            } else "NETCONF RPC"
+            if label == "commit-configuration" and _find(operation, "check") is not None:
+                label = "commit-check"
+            elif label == "load-configuration" and "rollback" in operation.attrib:
+                label = "discard-candidate"
+        timeout = self.timeout
+        self._trace(f"{label}: sending request; waiting for the switch reply.")
         try:
-            self._send(rpc)
-            reply = self._receive()
+            # Flash writes and daemon activation can outlast ordinary read RPCs.
+            if committing:
+                self.timeout = max(timeout, COMMIT_TIMEOUT)
+                self._trace(f"commit-configuration: waiting up to {self.timeout:g} seconds for acknowledgement.")
+            try:
+                self._send(rpc)
+                reply = self._receive()
+            finally:
+                self.timeout = timeout
         except DriverError:
+            self._trace(f"{label}: response/framing failure; connection closed.")
             # A partial frame cannot safely be reused.
             self.close()
+            if committing:
+                raise PartialApply(
+                    "Commit acknowledgement was lost. The switch may have committed the change. "
+                    "No retry was attempted; synchronize and reconcile actual configuration before restaging."
+                ) from None
             raise
         except (OSError, socket.timeout, paramiko.SSHException):
+            self._trace(f"{label}: transport failure; connection closed.")
             self.close()
+            if committing:
+                raise PartialApply(
+                    "Commit acknowledgement was lost after a transport failure. The switch may have committed "
+                    "the change. No retry was attempted; synchronize and reconcile before restaging."
+                ) from None
             raise DriverError("NETCONF transport failed; refresh state before retrying.") from None
         if _local(reply.tag) != "rpc-reply" or reply.get("message-id") != message_id:
+            self._trace(f"{label}: unexpected response; connection closed.")
             self.close()
+            if committing:
+                raise PartialApply("Unexpected commit acknowledgement. Synchronize and reconcile before restaging.")
             raise DriverError("Unexpected NETCONF response.")
+        rejected = []
         for error in reply.iter():
-            if _local(error.tag) == "rpc-error" and _text(error, "error-severity").strip() != "warning":
-                raise DriverError("Switch rejected the NETCONF operation.")
+            if _local(error.tag) != "rpc-error":
+                continue
+            detail = _rpc_error_detail(error)
+            warning = _text(error, "error-severity").strip() == "warning"
+            self._trace(f"{label}: {'warning' if warning else 'rejected'}; {detail}")
+            if not warning:
+                rejected.append(detail)
+        if rejected:
+            raise DriverError(f"Switch rejected the NETCONF operation ({label}). {rejected[0]}")
+        self._trace(f"{label}: completed.")
         return reply
 
     @staticmethod
@@ -420,6 +506,14 @@ class JuniperEXDriver(BaseDriver):
         self._rpc(_element("load-configuration", compare="rollback", rollback="0"))
 
     def _transaction(self, operation, expected_config=None, commit=False):
+        self.transaction_diagnostics = []
+        self._trace_transaction = True
+        try:
+            return self._run_transaction(operation, expected_config, commit)
+        finally:
+            self._trace_transaction = False
+
+    def _run_transaction(self, operation, expected_config, commit):
         if commit and not isinstance(expected_config, str):
             raise DriverError("Expected configuration is required.")
         self._rpc(_element("lock-configuration"))
@@ -428,9 +522,12 @@ class JuniperEXDriver(BaseDriver):
         failed = False
         try:
             if self._compare().strip():
+                self._trace("Baseline check: existing candidate changes; load refused.")
                 raise ConfigConflict("The switch has pending configuration changes.")
             if commit and self.get_config() != expected_config:
+                self._trace("Baseline check: committed configuration changed; load refused.")
                 raise ConfigConflict("Configuration changed; refresh before applying.")
+            self._expand_unit_deletes(operation)
             # A partially successful load must also be discarded on RPC errors.
             owned = True
             self._rpc(operation)
@@ -461,7 +558,55 @@ class JuniperEXDriver(BaseDriver):
             if cleanup_failed:
                 self.close()
                 if not failed:
+                    if committed:
+                        raise PartialApply(
+                            "The switch acknowledged the commit, but candidate unlock failed. "
+                            "Synchronize and reconcile before restaging; do not apply again."
+                        )
                     raise DriverError("Candidate cleanup failed; refresh state before retrying.")
+
+    def _expand_unit_deletes(self, operation):
+        commands_node = operation.find("configuration-set")
+        if commands_node is None:
+            return
+        commands = (commands_node.text or "").splitlines()
+        tokens = [shlex.split(command) for command in commands]
+        if not any(len(parts) == 4 and parts[:2] == ["delete", "interfaces"] and parts[3] == "unit"
+                   for parts in tokens):
+            return
+        # Older Junos set-format loads require the key for each deleted unit.
+        root = ET.fromstring(self.get_config_xml())
+        units = {}
+        interfaces = _find(root, "interfaces")
+        if interfaces is not None:
+            for interface in interfaces:
+                if _local(interface.tag) != "interface":
+                    continue
+                port = next((child.text for child in interface if _local(child.tag) == "name"), "")
+                units[port] = {
+                    _text(child, "name").strip() for child in interface if _local(child.tag) == "unit"
+                }
+        expanded = []
+        for command, parts in zip(commands, tokens):
+            if len(parts) >= 3 and parts[1] == "interfaces":
+                port_units = units.setdefault(parts[2], set())
+                if len(parts) == 4 and parts[0] == "delete" and parts[3] == "unit":
+                    for unit in sorted(port_units):
+                        if not re.fullmatch(r"[0-9]{1,10}", unit):
+                            raise DriverError("Cannot safely resolve interface unit identifiers.")
+                        expanded.append(f"delete interfaces {validation.interface(parts[2])} unit {unit}")
+                    port_units.clear()
+                    continue
+                if len(parts) >= 5 and parts[3] == "unit":
+                    if parts[0] == "set":
+                        port_units.add(parts[4])
+                    elif len(parts) == 5:
+                        port_units.discard(parts[4])
+                elif len(parts) == 3 and parts[0] == "delete":
+                    port_units.clear()
+            expanded.append(command)
+        commands_node.text = "\n".join(expanded) + "\n"
+        self._trace("Load preparation: whole-unit deletions expanded to explicit unit identifiers.")
 
     @staticmethod
     def _load_commands(commands):

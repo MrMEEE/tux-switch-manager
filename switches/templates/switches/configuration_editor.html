@@ -4,18 +4,20 @@
 <section class="panel form-panel">
   <p class="eyebrow">CURRENT CONFIGURATION EDITOR</p>
   <h1>{{ label }}{% if item %}: {{ item.key }}{% endif %}</h1>
+  {% if editing_change %}<p class="notice">Editing staged change #{{ editing_change.pk }}. Saving replaces this pending change, not the device configuration. Revert/remove it to discard the entire local change.</p>{% endif %}
   <p class="muted">Prefilled from synchronized revision #{{ revision.pk }}. Saving stages only the fields you change. Nothing is applied until you review and commit.</p>
+  <div data-live-url="/ws/live/editor-state/{{ switch.pk }}/" data-editor-revision="{{ revision.pk }}" data-editor-profile="{{ switch.driver }}"{% if editing_change %} data-editor-change="{{ editing_change.pk }}" data-editor-token="{{ form.initial.staged_token }}"{% endif %}></div>
   {% if web_driver %}<p class="notice">HTTP is unencrypted. Applying has no remote lock, atomic commit or rollback. Readback checks only managed fields, not startup persistence. Use Save Configuration in the device GUI after verifying the result. Management-port/VLAN edits can disconnect access.</p>{% endif %}
   {% if comware_driver %}<p class="notice">Experimental HP V1910 Comware 5 profile: live compatibility unverified. SSH2 only. CLI writes have no atomic commit, lock or rollback. Full configuration readback is checked; startup configuration is not saved. Port/VLAN edits can disconnect management access.</p>{% endif %}
   {% if item.implicit_default %}<p class="notice">This is Junos' implicit default VLAN. Leave VLAN ID blank to preserve it. Rename and deletion are unavailable here. Changing the routed management address or membership can disconnect the switch; changes remain staged until you commit.</p>{% endif %}
   {% if section == 'firewall' %}<p class="notice">IPv4 filter terms only. Editing preserves term order and unrelated rules. This editor does not attach filters to interfaces.</p>{% endif %}
   {% if section == 'lags' %}<p class="notice">New member attachments remove those ports' existing unit configuration. Removing members leaves them detached; configure their switching settings separately.</p>{% endif %}
   {% if form.initial.kind == 'snmp-community' %}<p class="notice">The community secret is hidden. Read-write access and unrestricted clients are risky: prefer read-only access restricted to a trusted management network.</p>{% endif %}
-  <form method="post">
+  <form method="post" data-configuration-editor>
     {% csrf_token %}
     {% include 'switches/form_fields.html' %}
     {% if deletable %}<label class="checkbox-field"><input type="checkbox" name="confirm_delete">Confirm deletion if the Delete operation is selected.</label>{% endif %}
-    <div class="form-actions"><button>Save to staged changes</button><a class="button quiet" href="{% url 'switch-detail' switch.pk %}#configuration">Cancel</a></div>
+    <div class="form-actions"><button>{% if editing_change %}Update staged change{% else %}Save to staged changes{% endif %}</button><a class="button quiet" href="{% url 'switch-detail' switch.pk %}#configuration">Cancel</a></div>
   </form>
 </section>
 {% endblock %}

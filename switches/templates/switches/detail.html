@@ -2,7 +2,7 @@
 {% block title %}{{ switch.name }} · Tux{% endblock %}
 {% block content %}
 <a class="back" href="{% url 'dashboard' %}">← Fleet</a>
-<div class="heading"><div><p class="eyebrow">DEVICE WORKSPACE</p><h1 data-live-text="name">{{ switch.name }}</h1><p class="muted mono" data-live-text="identity">{{ switch.address }} · {{ switch.driver }} · {{ switch.model }}</p></div><div class="actions">{% if device_admin and perms.switches.manage_inventory %}<a class="button quiet" href="{% url 'switch-edit' switch.pk %}">Edit inventory</a>{% endif %}<form method="post" action="{% url 'switch-action' switch.pk %}">{% csrf_token %}<input type="hidden" name="action" value="sync"><button>Sync now</button></form></div></div>
+<div class="heading" data-live-url="/ws/live/switch-heading/{{ switch.pk }}/">{% include 'switches/switch_heading.html' %}</div>
 <p id="connection" class="muted" aria-live="polite">Live updates connecting…</p>
 <div id="live-detail" data-live-url="/ws/live/switch/{{ switch.pk }}/">{% include 'switches/switch_data.html' %}</div>
 {% endblock %}

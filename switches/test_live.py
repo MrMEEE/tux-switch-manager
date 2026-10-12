@@ -30,13 +30,13 @@ class LiveWebsocketTests(TransactionTestCase):
         self.session_key = self.client.session.session_key
         self.client.get("/")
 
-    def communicator(self, topic, pk=None, authenticated=True, origin=b"http://testserver"):
+    def communicator(self, topic, pk=None, authenticated=True, origin=b"http://testserver", query=""):
         from tux_switch.asgi import application
         headers = [(b"origin", origin)]
         if authenticated:
             headers.append((b"cookie", "; ".join(f"{name}={cookie.value}" for name, cookie in self.client.cookies.items()).encode()))
         suffix = f"{topic}/{pk}/" if pk is not None else f"{topic}/"
-        return WebsocketCommunicator(application, f"/ws/live/{suffix}", headers=headers)
+        return WebsocketCommunicator(application, f"/ws/live/{suffix}{query}", headers=headers)
 
     async def event(self, resource):
         await get_channel_layer().group_send("live.updates", {
@@ -143,6 +143,82 @@ class LiveWebsocketTests(TransactionTestCase):
             await communicator.disconnect()
         async_to_sync(check)()
 
+    def test_job_output_distinguishes_queued_running_and_live_progress(self):
+        from .tasks import job_progress
+        from django.utils import timezone
+        job = Job.objects.create(switch=self.switch, action="sync")
+        async def check():
+            socket = self.communicator("job", job.pk)
+            self.assertTrue((await socket.connect())[0])
+            self.assertIn("Queued: waiting for an available worker", (await socket.receive_json_from())["html"])
+            await database_sync_to_async(lambda: Job.objects.filter(pk=job.pk).update(
+                status="running", started_at=timezone.now(),
+            ))()
+            await self.event("job")
+            html = (await socket.receive_json_from())["html"]
+            self.assertIn("Running: the worker has started", html)
+            self.assertIn("Started", html)
+            await database_sync_to_async(lambda: job_progress(job.pk, "Collecting device snapshot."))()
+            html = (await socket.receive_json_from())["html"]
+            self.assertIn("In progress: Collecting device snapshot.", html)
+            self.assertNotIn("Awaiting worker output", html)
+            await socket.disconnect()
+        async_to_sync(check)()
+    def test_history_live_sync_success_updates_timestamp_and_failure_adds_row(self):
+        from django.utils import timezone
+        from django.utils.formats import date_format
+        job = Job.objects.create(switch=self.switch, action="sync", status="running")
+        completed = timezone.now().replace(microsecond=0)
+        async def check():
+            socket = self.communicator("switch", self.switch.pk)
+            self.assertTrue((await socket.connect())[0])
+            initial = (await socket.receive_json_from())["html"]
+            self.assertIn("Last successful sync: Never", initial)
+            self.assertNotIn(f"/jobs/{job.pk}/", initial)
+            await database_sync_to_async(lambda: Job.objects.filter(pk=job.pk).update(
+                status="success", completed_at=completed,
+            ))()
+            await self.event("job")
+            success = (await socket.receive_json_from())["html"]
+            self.assertIn(date_format(timezone.localtime(completed), "M j, Y H:i:s T"), success)
+            self.assertNotIn(f"/jobs/{job.pk}/", success)
+            await database_sync_to_async(lambda: Job.objects.filter(pk=job.pk).update(status="failed"))()
+            await self.event("job")
+            failed = (await socket.receive_json_from())["html"]
+            self.assertIn(f"/jobs/{job.pk}/", failed)
+            self.assertIn("Last successful sync: Never", failed)
+            await socket.disconnect()
+        async_to_sync(check)()
+
+    def test_verification_result_updates_uncertain_controls_and_job_history_live(self):
+        from .models import ConfigChange
+        from .services import record_revision
+        from .test_configuration import CONFIG_XML
+        SwitchAccess.objects.filter(user=self.user, switch=self.switch).update(role="operator")
+        revision = record_revision(self.switch, "baseline")
+        Switch.objects.filter(pk=self.switch.pk).update(snapshot={"config": "baseline", "config_xml": CONFIG_XML})
+        change = ConfigChange.objects.create(
+            switch=self.switch, base_revision=revision, commands="set system host-name new", status="uncertain",
+        )
+        job = Job.objects.create(switch=self.switch, action="verify", payload={"change_id": change.pk})
+        async def check():
+            socket = self.communicator("switch", self.switch.pk)
+            self.assertTrue((await socket.connect())[0])
+            self.assertIn("Verify outcome", (await socket.receive_json_from())["html"])
+            await database_sync_to_async(lambda: ConfigChange.objects.filter(pk=change.pk).update(
+                status="committed", verification={"outcome": "applied", "job_id": job.pk},
+            ))()
+            await database_sync_to_async(lambda: Job.objects.filter(pk=job.pk).update(
+                status="success", output="Verified applied.",
+            ))()
+            await self.event("switch")
+            html = (await socket.receive_json_from())["html"]
+            self.assertNotIn("Verify outcome", html)
+            self.assertNotIn("uncertain device outcome", html)
+            self.assertIn(f"/jobs/{job.pk}/", html)
+            await socket.disconnect()
+        async_to_sync(check)()
+
     def test_revoked_permission_or_session_closes_socket(self):
         for revoke in [
             lambda: self.user.user_permissions.clear(),
@@ -223,6 +299,153 @@ class LiveWebsocketTests(TransactionTestCase):
         with patch("switches.signals.notify_live") as notify:
             Credential.objects.create(name="New", username="user", password="private")
         notify.assert_called_once_with("credentials")
+
+    def test_navigation_account_and_fleet_controls_follow_access_changes(self):
+        async def check():
+            navigation = self.communicator("navigation", query="?path=/discovery/")
+            account = self.communicator("account")
+            controls = self.communicator("fleet-controls")
+            for socket in (navigation, account, controls):
+                self.assertTrue((await socket.connect())[0])
+            initial = (await navigation.receive_json_from())["html"]
+            self.assertIn("Discovery", initial)
+            self.assertIn('aria-current="page"', initial)
+            self.assertIn("live-user", (await account.receive_json_from())["html"])
+            self.assertNotIn("Add switch", (await controls.receive_json_from())["html"])
+            await database_sync_to_async(lambda: self.user.user_permissions.add(
+                Permission.objects.get(codename="manage_inventory")))()
+            # The m2m signal publishes this event itself.
+            await navigation.receive_json_from()
+            await account.receive_json_from()
+            self.assertIn("Add switch", (await controls.receive_json_from())["html"])
+            await database_sync_to_async(lambda: self.user.user_permissions.clear())()
+            self.assertNotIn("Discovery", (await navigation.receive_json_from())["html"])
+            await account.receive_json_from()
+            self.assertNotIn("Add switch", (await controls.receive_json_from())["html"])
+            await database_sync_to_async(lambda: get_user_model().objects.filter(pk=self.user.pk).update(username="Renamed-user"))()
+            await self.event("access")
+            await navigation.receive_json_from()
+            self.assertIn("Renamed-user", (await account.receive_json_from())["html"])
+            await controls.receive_json_from()
+            for socket in (navigation, account, controls):
+                await socket.disconnect()
+        async_to_sync(check)()
+
+    def test_switch_heading_updates_name_title_and_admin_controls(self):
+        self.user.user_permissions.add(Permission.objects.get(codename="manage_inventory"))
+        SwitchAccess.objects.filter(user=self.user, switch=self.switch).update(role="admin")
+        async def check():
+            socket = self.communicator("switch-heading", self.switch.pk)
+            self.assertTrue((await socket.connect())[0])
+            self.assertIn("Edit inventory", (await socket.receive_json_from())["html"])
+            await database_sync_to_async(lambda: Switch.objects.filter(pk=self.switch.pk).update(name="Live rename", model="EX3300"))()
+            await self.event("switch")
+            result = await socket.receive_json_from()
+            self.assertIn("Live rename", result["html"])
+            self.assertEqual(result["metadata"]["title"], "Live rename · Tux")
+            await database_sync_to_async(lambda: SwitchAccess.objects.filter(user=self.user, switch=self.switch).update(role="viewer"))()
+            await self.event("access")
+            self.assertNotIn("Edit inventory", (await socket.receive_json_from())["html"])
+            await socket.disconnect()
+        async_to_sync(check)()
+
+    def test_editor_live_state_marks_changed_baseline_and_stage_outdated(self):
+        from .services import record_revision
+        from .models import ConfigChange
+        from .staged_editing import fingerprint
+        SwitchAccess.objects.filter(user=self.user, switch=self.switch).update(role="operator")
+        revision = record_revision(self.switch, "baseline")
+        change = ConfigChange.objects.create(switch=self.switch, base_revision=revision, commands="set system host-name new")
+        query = f"?revision={revision.pk}&profile=juniper_ex&change={change.pk}&token={fingerprint(change)}"
+        async def check():
+            socket = self.communicator("editor-state", self.switch.pk, query=query)
+            self.assertTrue((await socket.connect())[0])
+            self.assertFalse((await socket.receive_json_from())["metadata"]["editor_stale"])
+            await database_sync_to_async(lambda: ConfigChange.objects.filter(pk=change.pk).update(status="applying"))()
+            await self.event("switch")
+            result = await socket.receive_json_from()
+            self.assertTrue(result["metadata"]["editor_stale"])
+            self.assertIn("Your draft is preserved", result["html"])
+            await database_sync_to_async(lambda: SwitchAccess.objects.filter(user=self.user).update(role="viewer"))()
+            await self.event("access")
+            self.assertEqual((await socket.receive_output())["code"], 4403)
+            await socket.disconnect()
+        async_to_sync(check)()
+
+    def test_editor_baseline_and_fingerprint_changes_are_detected(self):
+        from .services import record_revision
+        from .models import ConfigChange
+        from .staged_editing import fingerprint
+        SwitchAccess.objects.filter(user=self.user, switch=self.switch).update(role="operator")
+        revision = record_revision(self.switch, "baseline")
+        change = ConfigChange.objects.create(switch=self.switch, base_revision=revision, commands="set system host-name new")
+        async def check():
+            baseline = self.communicator(
+                "editor-state", self.switch.pk, query=f"?revision={revision.pk}&profile=juniper_ex",
+            )
+            staged = self.communicator(
+                "editor-state", self.switch.pk,
+                query=f"?revision={revision.pk}&profile=juniper_ex&change={change.pk}&token={fingerprint(change)}",
+            )
+            for socket in (baseline, staged):
+                self.assertTrue((await socket.connect())[0])
+                self.assertFalse((await socket.receive_json_from())["metadata"]["editor_stale"])
+            await database_sync_to_async(lambda: ConfigChange.objects.filter(pk=change.pk).update(commands="set system host-name different"))()
+            await self.event("switch")
+            self.assertFalse((await baseline.receive_json_from())["metadata"]["editor_stale"])
+            self.assertTrue((await staged.receive_json_from())["metadata"]["editor_stale"])
+            await database_sync_to_async(lambda: record_revision(self.switch, "new baseline"))()
+            for socket in (baseline, staged):
+                result = await socket.receive_json_from()
+                self.assertTrue(result["metadata"]["editor_stale"])
+                self.assertIn("Latest revision:", result["html"])
+                await socket.disconnect()
+        async_to_sync(check)()
+
+    def test_revision_live_name_and_role_revocation(self):
+        from .services import record_revision
+        SwitchAccess.objects.filter(user=self.user, switch=self.switch).update(role="operator")
+        revision = record_revision(self.switch, "<private-config>")
+        async def check():
+            socket = self.communicator("revision", revision.pk)
+            self.assertTrue((await socket.connect())[0])
+            self.assertIn("&lt;private-config&gt;", (await socket.receive_json_from())["html"])
+            await database_sync_to_async(lambda: Switch.objects.filter(pk=self.switch.pk).update(name="Changed name"))()
+            await self.event("switch")
+            self.assertEqual((await socket.receive_json_from())["metadata"]["name"], "Changed name")
+            await database_sync_to_async(lambda: SwitchAccess.objects.filter(user=self.user).update(role="viewer"))()
+            await self.event("access")
+            self.assertEqual((await socket.receive_output())["code"], 4403)
+            await socket.disconnect()
+        async_to_sync(check)()
+
+    def test_inventory_and_credential_forms_update_without_sending_passwords(self):
+        self.user.user_permissions.add(
+            Permission.objects.get(codename="manage_inventory"),
+            Permission.objects.get(codename="manage_credentials"),
+        )
+        SwitchAccess.objects.filter(user=self.user, switch=self.switch).update(role="admin")
+        credential = Credential.objects.create(name="Initial choice", username="netops", password="private-password")
+        async def check():
+            inventory = self.communicator("inventory-form", self.switch.pk)
+            credentials = self.communicator("credential-form", credential.pk)
+            for socket in (inventory, credentials):
+                self.assertTrue((await socket.connect())[0])
+                self.assertNotIn("private-password", (await socket.receive_json_from())["html"])
+            await database_sync_to_async(lambda: Credential.objects.filter(pk=credential.pk).update(name="Renamed choice"))()
+            await self.event("credentials")
+            self.assertIn("Renamed choice", (await inventory.receive_json_from())["html"])
+            self.assertIn("Renamed choice", (await credentials.receive_json_from())["html"])
+            await database_sync_to_async(lambda: Switch.objects.filter(pk=self.switch.pk).update(name="Renamed switch"))()
+            await self.event("switch")
+            self.assertIn("Renamed switch", (await inventory.receive_json_from())["html"])
+            await database_sync_to_async(lambda: SwitchAccess.objects.filter(user=self.user).update(role="viewer"))()
+            await self.event("access")
+            self.assertEqual((await inventory.receive_output())["code"], 4403)
+            await credentials.receive_json_from()
+            for socket in (inventory, credentials):
+                await socket.disconnect()
+        async_to_sync(check)()
 
     def test_rolled_back_model_change_does_not_publish(self):
         from django.db import transaction

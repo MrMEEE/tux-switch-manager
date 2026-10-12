@@ -104,6 +104,8 @@ class ConfigChange(models.Model):
     base_revision = models.ForeignKey(ConfigRevision, on_delete=models.RESTRICT)
     commands = EncryptedTextField()
     reason = EncryptedTextField(blank=True, default="")
+    editor_data = EncryptedJSONField(default=dict, blank=True)
+    verification = EncryptedJSONField(default=dict, blank=True)
     status = models.CharField(max_length=20, default="pending")
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)

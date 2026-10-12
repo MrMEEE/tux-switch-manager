@@ -13,9 +13,9 @@ from django.db import transaction
 from .drivers import validation
 from .drivers.base import DriverError
 from .configuration_options import add_fields, clean_options, interface_options, option_commands, vlan_numbers
-from .models import ConfigChange, ConfigRevision, Switch
+from .models import ConfigRevision, Switch
 from .permissions import can_access
-from .services import command_lines, notify_switch
+from .services import command_lines
 
 SECTIONS = {
     "ports": "Ports", "vlans": "VLANs", "lags": "Link aggregation",
@@ -626,9 +626,6 @@ def stage_editor(switch, form, user):
         revision = ConfigRevision.objects.filter(switch=device).first()
         if not revision or revision.pk != form.cleaned_data["revision"]:
             raise DriverError("Configuration changed since this editor was opened. Reload before saving.")
-        change = ConfigChange.objects.create(
-            switch=device, base_revision=revision, commands="\n".join(command_lines("\n".join(commands))),
-            created_by=user,
-        )
-        transaction.on_commit(lambda: notify_switch(device.pk))
+        from .staged_editing import save_change
+        change = save_change(device, revision, form, "\n".join(command_lines("\n".join(commands))), user)
     return change

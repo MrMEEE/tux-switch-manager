@@ -199,6 +199,76 @@ class BackendTests(TestCase):
         change.refresh_from_db()
         self.assertEqual(change.status, "committed")
 
+    def test_running_progress_is_persisted_before_device_operation(self):
+        driver = self.driver()
+        change = stage_change(self.switch, "set system host-name new", self.user)
+        change.status = "applying"
+        change.save()
+        job = Job.objects.create(
+            switch=self.switch, action="apply", payload={"change_id": change.pk}, created_by=self.user,
+        )
+        observed = []
+
+        def apply(*args, **kwargs):
+            current = Job.objects.get(pk=job.pk)
+            observed.append(current.output)
+            self.assertEqual(current.status, "running")
+            self.assertIsNotNone(current.started_at)
+            driver.progress_callback("commit-configuration: waiting for acknowledgement.")
+            observed.append(Job.objects.get(pk=job.pk).output)
+            return "commit complete"
+
+        driver.apply.side_effect = apply
+        with patch("switches.tasks.get_driver", return_value=driver), patch("switches.tasks.notify_live") as notify:
+            execute_job(job.pk)
+        self.assertIn("Validating and applying", observed[0])
+        self.assertIn("waiting for acknowledgement", observed[1])
+        job.refresh_from_db()
+        self.assertEqual(job.status, "success")
+        self.assertEqual(job.output, "commit complete")
+        self.assertGreater(notify.call_count, 2)
+
+    def test_progress_failure_does_not_interrupt_or_mutate_completed_jobs(self):
+        from .tasks import job_progress
+        job = Job.objects.create(switch=self.switch, action="sync", status="success", output="final")
+        job_progress(job.pk, "late progress")
+        job.refresh_from_db()
+        self.assertEqual(job.output, "final")
+        with patch("switches.tasks.Job.objects.filter", side_effect=RuntimeError("private-detail")):
+            with self.assertLogs("switches.tasks", level="WARNING") as logs:
+                job_progress(job.pk, "safe progress")
+        self.assertNotIn("private-detail", "".join(logs.output))
+    @patch("switches.tasks.notify_switch")
+    def test_configuration_jobs_persist_transaction_diagnostics_on_success_and_failure(self, notify):
+        from .drivers.base import DriverError
+
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                driver = self.driver()
+                driver.transaction_diagnostics = [
+                    "lock-configuration: completed.",
+                    "commit-check: rejected; error-tag=operation-failed" if failed else "commit-configuration: completed.",
+                    "unlock-configuration: completed.",
+                ]
+                if failed:
+                    driver.apply.side_effect = DriverError("Configuration validation failed.")
+                change = stage_change(self.switch, "set system host-name new", self.user)
+                change.status = "applying"
+                change.save()
+                job = Job.objects.create(
+                    switch=self.switch, action="apply", payload={"change_id": change.pk}, created_by=self.user,
+                )
+                with patch("switches.tasks.get_driver", return_value=driver):
+                    execute_job(job.pk)
+                job.refresh_from_db()
+                self.assertEqual(job.status, "failed" if failed else "success")
+                self.assertIn("NETCONF transaction diagnostics", job.output)
+                self.assertIn("unlock-configuration: completed.", job.output)
+                if failed:
+                    self.assertIn("Configuration validation failed.", job.output)
+                    change.refresh_from_db()
+                    self.assertEqual(change.status, "pending")
+
     @patch("switches.tasks.notify_switch")
     def test_revoked_permission_never_contacts_device(self, notify):
         job = Job.objects.create(switch=self.switch, action="reboot", created_by=self.user)
@@ -254,7 +324,29 @@ class BackendTests(TestCase):
         job.refresh_from_db()
         change.refresh_from_db()
         self.assertEqual(job.status, "failed")
-        self.assertEqual(change.status, "pending")
+        self.assertEqual(change.status, "uncertain")
+
+    @patch("switches.tasks.notify_switch")
+    def test_junos_lost_commit_reply_blocks_retry_and_saves_diagnostics(self, notify):
+        from .drivers.base import PartialApply
+        driver = self.driver()
+        driver.apply.side_effect = PartialApply("Commit acknowledgement was lost.")
+        driver.transaction_diagnostics = ["commit-configuration: transport failure; connection closed."]
+        change = stage_change(self.switch, "set system host-name new", self.user)
+        change.status = "applying"
+        change.save()
+        job = Job.objects.create(
+            switch=self.switch, action="apply", payload={"change_id": change.pk}, created_by=self.user,
+        )
+        with patch("switches.tasks.get_driver", return_value=driver):
+            execute_job(job.pk)
+        change.refresh_from_db()
+        job.refresh_from_db()
+        self.assertEqual(change.status, "uncertain")
+        self.assertEqual(job.status, "failed")
+        self.assertIn("commit-configuration: transport failure", job.output)
+        with self.assertRaises(ValueError):
+            queue_change(change, action="apply", user=self.user)
 
     @patch("switches.tasks.notify_switch")
     def test_snmp_failure_does_not_break_ssh_poll(self, notify):

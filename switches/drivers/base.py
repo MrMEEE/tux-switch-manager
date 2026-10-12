@@ -21,6 +21,10 @@ class ConfigConflict(DriverError):
     """The committed configuration changed since the caller's snapshot."""
 
 
+class PartialApply(DriverError):
+    """A write was attempted; its outcome must be reconciled before restaging."""
+
+
 class UnsupportedCapability(DriverError):
     """The requested operation is not implemented by this driver."""
 
@@ -49,6 +53,11 @@ class BaseDriver:
     configuration_sections = frozenset()
     configuration_add_sections = frozenset()
     combined_changes = False
+    progress_callback = None
+
+    def report_progress(self, message):
+        if self.progress_callback is not None:
+            self.progress_callback(message)
 
     def supports(self, capability):
         return capability in self.capabilities

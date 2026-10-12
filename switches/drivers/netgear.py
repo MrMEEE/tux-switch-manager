@@ -11,7 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, HTTPCookieProcessor, ProxyHandler, Request, build_opener
 
-from .base import BaseDriver, ConfigConflict, DriverError
+from .base import BaseDriver, ConfigConflict, DriverError, PartialApply
 from .validation import address
 from .https_transport import PinnedHTTPSHandler, tls_context
 from urllib.request import HTTPSHandler
@@ -40,10 +40,6 @@ SPEEDS = {
     "MbpsFullDuplex10": "10 Mbps full duplex", "MbpsHalfDuplex100": "100 Mbps half duplex",
     "MbpsFullDuplex100": "100 Mbps full duplex", "MbpsFullDuplex1000": "1000 Mbps full duplex",
 }
-
-
-class PartialApply(DriverError):
-    """A write was attempted; its outcome must be reconciled before restaging."""
 
 
 class FormRejected(DriverError):
@@ -197,6 +193,19 @@ def operations(lines):
     if len({(op["section"], op["key"]) for op in result}) != len(result):
         raise DriverError("Conflicting NETGEAR operations.")
     return result
+
+
+def planned_state(state, ops):
+    target = copy.deepcopy(state)
+    for op in ops:
+        section, key = op["section"], op["key"]
+        if section == "system":
+            target[section].update(op["values"])
+        else:
+            if key not in target[section]:
+                raise ConfigConflict("The NETGEAR item no longer exists. Synchronize and restage.")
+            target[section][key].update(op["values"])
+    return target
 
 
 class NetgearGS108Tv2Driver(BaseDriver):
@@ -426,16 +435,7 @@ class NetgearGS108Tv2Driver(BaseDriver):
     def _planned(self, ops):
         if self.state is None:
             raise DriverError("NETGEAR configuration was not collected.")
-        target = copy.deepcopy(self.state)
-        for op in ops:
-            section, key = op["section"], op["key"]
-            if section == "system":
-                target[section].update(op["values"])
-            else:
-                if key not in target[section]:
-                    raise ConfigConflict("The NETGEAR item no longer exists. Synchronize and restage.")
-                target[section][key].update(op["values"])
-        return target
+        return planned_state(self.state, ops)
 
     def preview(self, commands):
         ops = operations(commands)

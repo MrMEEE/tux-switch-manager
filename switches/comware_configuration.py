@@ -5,7 +5,7 @@ import json
 from django import forms
 
 from .drivers.base import DriverError
-from .drivers.comware import SLUG, normalize, operation, plan, rows_from_config
+from .drivers.comware import SLUG, normalize, operation, plan, rows_from_config as parse_config
 from .netgear_configuration import stage_managed_editor
 
 SECTIONS = {"ports": "Ports", "vlans": "VLANs", "system": "System"}
@@ -15,15 +15,19 @@ def current_state(switch):
     revision = switch.revisions.first()
     if revision is None:
         raise DriverError("Synchronize the Comware switch before editing.")
-    config = normalize(revision.config)
-    rows = rows_from_config(config)
+    return revision, rows_from_config(revision.config)
+
+
+def rows_from_config(config):
+    config = normalize(config)
+    rows = parse_config(config)
     rows["_config"] = config
     for row in rows["ports"]:
         row["summary"] = f"{row['admin_state']} | {row['mode']} | PVID {row['pvid']} | VLANs {', '.join(row['vlans'])}"
     for row in rows["vlans"]:
         row["summary"] = row["description"]
     rows["system"][0]["summary"] = rows["system"][0]["hostname"]
-    return revision, rows
+    return rows
 
 
 class EditorForm(forms.Form):
@@ -52,7 +56,7 @@ class EditorForm(forms.Form):
         self.order_fields([key for key in self.fields if key != "acknowledge"] + ["acknowledge"])
 
     def command(self, cleaned):
-        values = {key: value for key, value in cleaned.items() if key not in {"revision", "acknowledge"} and value != self.row.get(key)}
+        values = {key: value for key, value in cleaned.items() if key not in {"revision", "acknowledge", "staged_token"} and value != self.row.get(key)}
         if self.section == "ports" and set(values) & {"mode", "pvid", "vlans"}:
             values.update({key: cleaned[key] for key in ("mode", "pvid", "vlans")})
         line = json.dumps({"version": 1, "section": self.section, "key": self.row["key"], "values": values}, sort_keys=True)

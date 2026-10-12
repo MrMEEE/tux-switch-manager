@@ -1,2 +1,2 @@
 {% extends 'switches/base.html' %}
-{% block content %}<a class="back" href="{% url 'switch-detail' switch.pk %}">← {{ switch.name }}</a><p class="muted live-connection" aria-live="polite">Live updates connecting…</p><section class="panel" data-live-url="/ws/live/job/{{ job.pk }}/">{% include 'switches/job_data.html' %}</section>{% endblock %}
+{% block content %}<a class="back" href="{% url 'switch-detail' switch.pk %}">← <span data-live-text="name">{{ switch.name }}</span></a><p class="muted live-connection" aria-live="polite">Live updates connecting…</p><section class="panel" data-live-url="/ws/live/job/{{ job.pk }}/">{% include 'switches/job_data.html' %}</section>{% endblock %}

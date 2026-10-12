@@ -11,6 +11,24 @@ driver targets Juniper EX3300-24P and EX3300-48P, including older non-ELS Junos.
 - System, interface, VLAN, LAG, static-route, security and service configuration;
   validated manual `set`/`delete` commands for advanced settings.
 - Stage changes, preview and commit or discard. Immediate apply is disabled.
+  Configuration tables show locally planned values with a **Staged** pencil badge,
+  including new items and deletions. Review staged items before committing;
+  discard restores the synchronized display. Stale-baseline, uncertain or
+  unsupported local projections show explicit warnings instead of guessed values.
+  The display is local only and does not modify synchronized snapshots or devices.
+  Pending GUI changes can be reopened with **Edit staged change**; the form
+  prefills the staged values and saving replaces the same change, rather than
+  adding another. **Remove staged item** discards an addition; **Revert staged
+  change** discards an edit/deletion and restores the synchronized display.
+  These actions discard the whole staged change, including related items, and
+  never write to the switch. Running, uncertain and outdated changes cannot be
+  edited; uncertain changes must be reconciled before restaging. Older manual
+  multi-item batches may require removal and restaging through the GUI.
+  Configuration-table actions use compact review, edit, remove and revert icons
+  with hover tooltips and accessible labels.
+  Confirmations use in-app modals with Cancel/Escape support, not browser
+  JavaScript popups. Confirmation preserves the selected form action, while
+  live updates defer replacing the form until the dialog closes.
   Junos provides a device-generated diff and commit-check; the legacy NETGEAR
   adapter provides a local planned diff and managed-field readback instead.
 - Monitor chassis, health, interfaces, switching, routing, BGP, OSPF, ARP, MAC,
@@ -349,6 +367,68 @@ Combined changes must share the current baseline and are processed in staging
 order under one candidate lock. Discard-all affects pending changes only.
 Stale editor baselines are rejected, and remote apply still checks the exact
 committed baseline under the NETCONF configuration lock.
+
+NETCONF preview, commit and restore job outputs retain a bounded transaction
+trace, including the rejected RPC stage, allowlisted error codes, safe error
+categories, configuration line numbers when supplied, and candidate
+discard/unlock outcomes. Raw device error messages, configuration values and
+credentials are not logged. Existing failed jobs cannot recover details that
+were not saved. On older Junos releases, whole-unit deletions for LAG member
+attachment are expanded to explicit unit IDs under the candidate lock, including
+all configured units rather than assuming unit 0.
+
+Junos commit acknowledgements have a minimum 120-second reply deadline because
+flash writes and daemon activation can exceed normal read-RPC timeouts. A lost
+commit reply, failed post-commit unlock, or expired apply worker marks its change
+as **uncertain**, never pending/retryable. Synchronize and reconcile the actual
+device configuration before removing/restaging an uncertain change. The switch
+may already have committed even when its job is failed; no automatic commit
+retry is performed.
+Bulk preview/commit/discard controls are shown only when pending changes exist.
+Uncertain records remain visible with reconciliation instructions and cannot be
+committed again. Removing an uncertain record clears only the local staged
+record; it does not undo configuration already applied to the switch.
+
+Use **Verify outcome** on an uncertain change for read-only reconciliation.
+The worker synchronizes fresh device state and checks the intended settings,
+without loading a candidate, applying commands or committing. Matching settings
+resolve the record as committed with a **Verified applied** result in job history;
+this confirms current state, not which operation caused it. Missing/conflicting
+settings and unsupported comparisons retain the uncertain record and explain
+the result in the workspace and verification job. Remove/restage only the
+missing settings against the fresh baseline; there is no automatic retry.
+Verification results (time, revision, job and outcome) are encrypted at rest and
+permission-filtered. Comparisons ignore unrelated device changes; managed
+profiles compare the fields affected by their local plan, while supported Junos
+commands are projected onto fresh XML and checked for remaining effects.
+Startup persistence and operational link health are not certified by this check.
+
+WebSocket regions cover fleet, discovery, credentials, inventory/credential
+form data, device headings/actions, telemetry, configuration tables, staged
+changes, revisions, job output, account details and permission-dependent
+navigation. Focused controls no longer freeze unrelated live data. Updates
+preserve typed drafts, checked choices, focus/cursor, expanded details and scroll
+positions. Configuration editors receive live baseline/staged-change validity:
+an outdated draft is kept but cannot be saved until the editor is reopened.
+Workspace actions and discovery submission update their results over WebSockets
+without reloading the page; HTTP POST still authorizes and queues each action.
+Navigation between pages and saving an editor remain explicit navigation.
+Read-only revision contents are immutable; their permissions and device identity
+still refresh live. Django's administration site is separate from these
+application live regions.
+
+Device job history lists synchronization jobs only when they fail; queued,
+running and successful syncs remain stored and their individual output pages
+remain accessible. The latest successful sync completion time appears above
+the history table and updates live. Other operations retain their existing
+history and permission filtering.
+
+Job output distinguishes queued jobs from running operations and displays the
+worker start time. Running jobs push safe progress messages over WebSockets,
+including connection, synchronization, verification and Junos RPC stages.
+Commit acknowledgement waits are explicitly shown; a running job with no final
+result is not necessarily waiting in the queue. Progress delivery failures are
+logged without interrupting or retrying a device transaction.
 
 The GUI preserves unrelated settings. Complex items it cannot represent are
 marked for the collapsed **Advanced · manual configuration** editor instead of

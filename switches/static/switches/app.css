@@ -62,6 +62,11 @@ p { margin: 8px 0 16px; }
 .badge { display: inline-block; border: 1px solid #0070f055; background: #0070f022; color: #abd0ff; border-radius: 20px; font-size: 12px; padding: 3px 11px; }
 .button, button { display: inline-block; background: var(--accent); color: #fff; border: 1px solid transparent; border-radius: 6px; padding: 9px 16px; font-weight: 600; cursor: pointer; }
 .button:hover, button:hover { background: #005ac0; text-decoration: none; }
+.configuration-row-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.configuration-row-actions form { margin: 0; }
+.icon-button { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; padding: 8px; flex-shrink: 0; }
+.action-icon { width: 20px; height: 20px; }
+.icon-button:focus-visible { outline: 2px solid #64aaff; outline-offset: 3px; }
 .quiet { background: #ffffff08; color: var(--text); border-color: #ffffff26; }
 .quiet:hover { background: #ffffff15; }
 .danger { background: #fc424a22; color: #ffafb3; border-color: #fc424a66; }

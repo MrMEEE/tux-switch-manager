@@ -18,6 +18,7 @@ ACTION_ROLES = {
     "ping": "viewer", "traceroute": "viewer", "reboot": "admin",
     "preview": "operator", "apply": "operator", "restore": "operator",
     "https_enable": "admin", "https_use": "admin",
+    "verify": "operator",
 }
 PUBLIC_MONITOR_SECTIONS = frozenset({
     "system", "uptime", "chassis", "chassis_env", "chassis_fpc", "health",
@@ -88,7 +89,7 @@ def queue_job(switch, action, payload, user):
         from .drivers.base import DriverError
         try:
             registered = driver_class(switch.driver)
-            capability = {"sync": "snapshot", "ping": "diagnostic", "traceroute": "diagnostic",
+            capability = {"sync": "snapshot", "verify": "snapshot", "ping": "diagnostic", "traceroute": "diagnostic",
                           "reboot": "diagnostic", "command": "run_command"}.get(action, action)
             if capability not in registered.capabilities:
                 raise DriverError("This driver does not support that operation.")
@@ -117,6 +118,12 @@ def queue_pending_changes(switch, action, user):
             raise ValueError("This profile has no atomic commit-all. Preview and commit one staged item at a time.")
         changes = list(device.changes.select_for_update().filter(status="pending").order_by("pk"))
         if not changes:
+            if device.changes.filter(status="uncertain").exists():
+                raise ValueError(
+                    "There are no pending changes. Uncertain changes cannot be committed again. "
+                    "Synchronize and reconcile actual configuration, then remove the uncertain record "
+                    "and stage only any missing settings."
+                )
             raise ValueError("There are no pending changes.")
         latest = device.revisions.first()
         if not latest or any(change.base_revision_id != latest.pk for change in changes):
@@ -180,6 +187,19 @@ def discard_change(change, user):
 
 
 def queue_change(change, action="preview", user=None):
+    if action == "verify":
+        if not can_access(user, change.switch, "operator"):
+            raise ValueError("You do not have permission to verify this change.")
+        with transaction.atomic():
+            device = Switch.objects.select_for_update().get(pk=change.switch_id)
+            current = ConfigChange.objects.select_for_update().get(pk=change.pk, switch=device)
+            if current.status != "uncertain":
+                raise ValueError("Only uncertain changes can be verified.")
+            if device.jobs.filter(
+                action="verify", status__in=["queued", "running"],
+            ).exists():
+                raise ValueError("An outcome verification is already queued or running for this switch.")
+            return queue_job(device, "verify", {"change_id": current.pk}, user)
     if action not in ("preview", "apply") or not can_access(user, change.switch, "operator"):
         raise ValueError("You do not have permission for this operation.")
     with transaction.atomic():

@@ -1,6 +1,6 @@
 {% extends 'switches/base.html' %}
 {% block content %}
-<div class="heading"><div><p class="eyebrow">NETWORK OVERVIEW</p><h1>Your fleet</h1><p class="muted">Monitor infrastructure. Stage changes. Stay in control.</p></div>{% if perms.switches.manage_inventory %}<a class="button" href="{% url 'switch-add' %}">＋ Add switch</a>{% endif %}</div>
+<div class="heading"><div><p class="eyebrow">NETWORK OVERVIEW</p><h1>Your fleet</h1><p class="muted">Monitor infrastructure. Stage changes. Stay in control.</p></div><div data-live-url="/ws/live/fleet-controls/">{% include 'switches/fleet_controls.html' %}</div></div>
 <p class="muted live-connection" aria-live="polite">Live updates connecting…</p>
 <section class="grid" data-live-url="/ws/live/fleet/">{% include 'switches/fleet_data.html' %}</section>
 {% endblock %}

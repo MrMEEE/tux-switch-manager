@@ -45,6 +45,78 @@ class WebTests(TestCase):
         self.client.logout()
         self.assertRedirects(self.client.get("/"), "/login/?next=/", fetch_redirect_response=False)
 
+    def test_history_filters_syncs_before_limit_and_uses_success_completion_time(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        completed = timezone.now() - timedelta(hours=1)
+        failed = Job.objects.create(switch=self.switch, action="sync", status="failed")
+        monitor = Job.objects.create(switch=self.switch, action="monitor", payload={"section": "interfaces"})
+        success = Job.objects.create(switch=self.switch, action="sync", status="success", completed_at=completed)
+        Job.objects.bulk_create([
+            Job(switch=self.switch, action="sync", status=status)
+            for status in ["queued", "running", "success"] * 40
+        ])
+        Job.objects.create(switch=self.switch, action="apply", status="success", completed_at=timezone.now())
+        for user in (self.viewer, self.operator):
+            self.client.force_login(user)
+            response = self.client.get(self.url("switch-detail"))
+            ids = {job.pk for job in response.context["jobs"]}
+            self.assertIn(failed.pk, ids)
+            self.assertIn(monitor.pk, ids)
+            self.assertNotIn(success.pk, ids)
+            self.assertEqual(response.context["last_successful_sync"], completed)
+            self.assertContains(response, "Last successful sync:")
+            self.assertTrue(all(job.action != "sync" or job.status == "failed" for job in response.context["jobs"]))
+        self.assertEqual(self.switch.jobs.filter(action="sync").count(), 122)
+        self.assertEqual(self.client.get(self.url("job-detail", self.switch.pk, success.pk)).status_code, 200)
+
+    def test_history_without_successful_sync_shows_never(self):
+        Job.objects.create(switch=self.switch, action="sync", status="failed")
+        response = self.client.get(self.url("switch-detail"))
+        self.assertIsNone(response.context["last_successful_sync"])
+        self.assertContains(response, "Last successful sync: Never")
+
+    def test_live_action_queues_without_redirect_and_returns_notices(self):
+        with patch("switches.services.publish_job"):
+            response = self.client.post(self.url("switch-action"), {"action": "sync"}, HTTP_X_LIVE_ACTION="true")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["redirect"], self.url("switch-detail"))
+        self.assertIn("Operation queued", response.json()["messages"][0]["text"])
+        self.assertEqual(Job.objects.filter(action="sync").count(), 1)
+
+    def test_live_action_errors_are_explicit_and_do_not_queue(self):
+        before = Job.objects.count()
+        response = self.client.post(
+            self.url("switch-action"), {"action": "monitor", "section": "invalid"}, HTTP_X_LIVE_ACTION="true",
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(Job.objects.count(), before)
+        self.client.force_login(self.operator)
+        response = self.client.post(
+            self.url("switch-stage"), {"section": "system", "commands": "commit"}, HTTP_X_LIVE_ACTION="true",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(response.json()["messages"])
+        self.assertEqual(ConfigChange.objects.count(), 1)
+
+    def test_live_change_action_preserves_submitter_and_rejects_running_change(self):
+        self.client.force_login(self.operator)
+        with patch("switches.services.publish_job"):
+            response = self.client.post(
+                self.url("change-action", self.switch.pk, self.change.pk),
+                {"action": "preview"}, HTTP_X_LIVE_ACTION="true",
+            )
+        self.assertEqual(response.status_code, 200)
+        self.change.refresh_from_db()
+        self.assertEqual(self.change.status, "previewing")
+        self.assertEqual(Job.objects.first().action, "preview")
+        response = self.client.post(
+            self.url("change-action", self.switch.pk, self.change.pk),
+            {"action": "apply"}, HTTP_X_LIVE_ACTION="true",
+        )
+        self.assertIn("not pending", response.json()["messages"][0]["text"])
+        self.assertEqual(Job.objects.filter(action="preview").count(), 1)
+
     def test_fleet_does_not_leak_inventory_or_sensitive_fields(self):
         response = self.client.get("/")
         self.assertContains(response, self.switch.name)

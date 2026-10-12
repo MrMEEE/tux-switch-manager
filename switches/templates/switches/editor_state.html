@@ -1,0 +1,2 @@
+<p class="muted">Live device status: {{ switch.status }} · Last synchronized: {{ switch.last_synced|default:"Never" }} · Latest revision: {{ latest_revision.pk|default:"None" }}</p>
+{% if editor_stale %}<p class="notice" role="alert">The configuration baseline or staged change changed while this editor was open. Your draft is preserved, but saving is disabled. Reopen the editor against the current configuration before saving.</p>{% endif %}

@@ -15,8 +15,12 @@ def current_state(switch):
     revision = switch.revisions.first()
     if revision is None:
         raise DriverError("Synchronize the NETGEAR Plus switch before editing.")
+    return revision, rows_from_config(revision.config)
+
+
+def rows_from_config(config):
     try:
-        baseline = json.loads(revision.config)
+        baseline = json.loads(config)
     except (ValueError, TypeError):
         raise DriverError("NETGEAR Plus managed baseline could not be read. Synchronize again.") from None
     if not isinstance(baseline, dict) or baseline.get("schema") != SCHEMA or any(
@@ -47,7 +51,7 @@ def current_state(switch):
             "system": [{"key": "system", "editable": True, **baseline["system"], "summary": baseline["system"]["hostname"]}],
             "_baseline": baseline,
             "_supported_sections": set(SECTIONS) if baseline.get("vlan_mode") == "advanced8021q" else {"system", "ports"}}
-    return revision, rows
+    return rows
 
 
 class EditorForm(forms.Form):
@@ -90,7 +94,7 @@ class EditorForm(forms.Form):
 
     def command(self, cleaned):
         values = {key: value for key, value in cleaned.items()
-                  if key not in {"revision", "acknowledge"} and value != self.row.get(key)}
+                  if key not in {"revision", "acknowledge", "staged_token"} and value != self.row.get(key)}
         if self.section == "vlans" and values:
             values = {key: cleaned[key] for key in ("tagged", "untagged")}
         if not values:

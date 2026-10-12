@@ -7,9 +7,8 @@ from django.db import transaction
 
 from .drivers.base import DriverError
 from .drivers.netgear import SLUG, SPEEDS, operations
-from .models import ConfigChange, Switch
+from .models import Switch
 from .permissions import can_access
-from .services import notify_switch
 
 SECTIONS = {"ports": "Ports", "vlans": "VLAN membership", "system": "System"}
 
@@ -18,8 +17,12 @@ def current_state(switch):
     revision = switch.revisions.first()
     if revision is None:
         raise DriverError("Synchronize the NETGEAR switch before editing.")
+    return revision, rows_from_config(revision.config)
+
+
+def rows_from_config(config):
     try:
-        state = json.loads(revision.config)
+        state = json.loads(config)
     except (ValueError, TypeError):
         raise DriverError("NETGEAR managed baseline could not be read. Synchronize again.") from None
     if not isinstance(state, dict) or state.get("schema") != "netgear-gs108tv2-v1" or any(
@@ -36,7 +39,7 @@ def current_state(switch):
         "system": [{"key": "system", "editable": True, **state["system"],
                     "summary": f"{state['system']['hostname']} | {state['system']['location']} | {state['system']['contact']}"}],
     }
-    return revision, rows
+    return rows
 
 
 class EditorForm(forms.Form):
@@ -78,7 +81,7 @@ class EditorForm(forms.Form):
         return cleaned
 
     def command(self, cleaned):
-        values = {key: value for key, value in cleaned.items() if key not in {"revision", "acknowledge"} and value != self.row.get(key)}
+        values = {key: value for key, value in cleaned.items() if key not in {"revision", "acknowledge", "staged_token"} and value != self.row.get(key)}
         if self.section == "vlans" and values:
             values = {key: cleaned[key] for key in ("tagged", "untagged")}
         if not values:
@@ -101,6 +104,6 @@ def stage_managed_editor(switch, form, user, slug, read_state):
         revision, _ = read_state(device)
         if revision.pk != form.cleaned_data["revision"]:
             raise DriverError("Device baseline changed. Reload before saving.")
-        change = ConfigChange.objects.create(switch=device, base_revision=revision, commands=line, created_by=user)
-        transaction.on_commit(lambda: notify_switch(device.pk))
+        from .staged_editing import save_change
+        change = save_change(device, revision, form, line, user)
         return change

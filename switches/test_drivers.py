@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 import paramiko
 
 from .drivers import BaseDriver, ConfigConflict, DriverError, JuniperEXDriver
+from .drivers.base import PartialApply
 from .drivers import UnsupportedCapability, registry
 from .drivers.juniper import DELIMITER, NETCONF, NETCONF_CAPABILITY
 from .drivers import validation
@@ -396,6 +397,98 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(self.channel.calls[-2:], ["discard", "unlock-configuration"])
         self.assertNotIn("commit", self.channel.calls)
 
+    def test_lag_unit_deletions_use_explicit_keys_under_lock(self):
+        config = (
+            '<configuration xmlns="http://xml.juniper.net/xnm/1.1/xnm"><interfaces>'
+            '<interface><name>ge-0/0/40</name><unit><name>0</name></unit>'
+            '<unit><name>12</name></unit></interface>'
+            '<interface><name>ge-0/0/41</name></interface>'
+            '</interfaces></configuration>'
+        )
+        with patch.object(self.driver, "get_config_xml", return_value=config) as read:
+            self.driver.preview([
+                "delete interfaces ge-0/0/40 unit",
+                "set interfaces ge-0/0/40 ether-options 802.3ad ae0",
+                "delete interfaces ge-0/0/41 unit",
+                "set interfaces ge-0/0/41 ether-options 802.3ad ae0",
+            ])
+        read.assert_called_once()
+        load = next(op for op in self.channel.operations if op.tag == "load-configuration" and "rollback" not in op.attrib)
+        self.assertEqual(load.findtext("configuration-set").splitlines(), [
+            "delete interfaces ge-0/0/40 unit 0",
+            "delete interfaces ge-0/0/40 unit 12",
+            "set interfaces ge-0/0/40 ether-options 802.3ad ae0",
+            "set interfaces ge-0/0/41 ether-options 802.3ad ae0",
+        ])
+        self.assertEqual(self.channel.calls[0], "lock-configuration")
+        self.assertNotIn("commit", self.channel.calls)
+        self.assertEqual(self.channel.calls[-2:], ["discard", "unlock-configuration"])
+
+    def test_unit_expansion_tracks_units_created_and_deleted_in_same_batch(self):
+        with patch.object(self.driver, "get_config_xml", return_value="<configuration/>"):
+            self.driver.preview([
+                "set interfaces ge-0/0/40 unit 3 family ethernet-switching",
+                "set interfaces ge-0/0/40 unit 4 family ethernet-switching",
+                "delete interfaces ge-0/0/40 unit 3",
+                "delete interfaces ge-0/0/40 unit",
+            ])
+        load = next(op for op in self.channel.operations if op.tag == "load-configuration" and "rollback" not in op.attrib)
+        self.assertTrue(load.findtext("configuration-set").endswith("delete interfaces ge-0/0/40 unit 4\n"))
+
+    def test_unresolvable_units_fail_before_loading_and_unlock(self):
+        config = '<configuration><interfaces><interface><name>ge-0/0/40</name><unit><name>private-detail</name></unit></interface></interfaces></configuration>'
+        with patch.object(self.driver, "get_config_xml", return_value=config):
+            with self.assertRaisesRegex(DriverError, "safely resolve") as error:
+                self.driver.preview(["delete interfaces ge-0/0/40 unit"])
+        self.assertNotIn("private-detail", str(error.exception))
+        self.assertNotIn("load", self.channel.calls)
+        self.assertEqual(self.channel.calls[-1], "unlock-configuration")
+
+    def test_transaction_diagnostics_save_safe_rpc_errors_and_cleanup(self):
+        original = self.channel.sendall
+
+        def reject(raw):
+            original(raw)
+            if self.channel.calls[-1] == "load":
+                reply = ET.fromstring(self.channel.wire[:-len(DELIMITER)])
+                error = ET.SubElement(reply, "rpc-error")
+                ET.SubElement(error, "error-tag").text = "operation-failed"
+                ET.SubElement(error, "error-type").text = "application"
+                ET.SubElement(error, "error-severity").text = "error"
+                ET.SubElement(error, "error-message").text = "syntax error, expecting <identifier>: private-credential"
+                ET.SubElement(error, "line-number").text = "3"
+                self.channel.wire = ET.tostring(reply) + DELIMITER
+
+        self.channel.sendall = reject
+        with self.assertRaisesRegex(DriverError, "load-configuration") as error:
+            self.driver.apply(["set system host-name new"], self.channel.committed_config)
+        trace = "\n".join(self.driver.transaction_diagnostics)
+        self.assertIn("expected an identifier", str(error.exception))
+        self.assertIn("error-tag=operation-failed", trace)
+        self.assertIn("configuration line=3", trace)
+        self.assertIn("discard-candidate: completed", trace)
+        self.assertIn("unlock-configuration: completed", trace)
+        self.assertNotIn("private-credential", trace + str(error.exception))
+        self.assertNotIn("host-name new", trace)
+        self.assertFalse(self.driver._trace_transaction)
+        self.channel.sendall = original
+        self.driver.preview(["set system host-name new"])
+        self.assertNotIn("rejected", "\n".join(self.driver.transaction_diagnostics))
+        self.assertIn("commit-check: completed", "\n".join(self.driver.transaction_diagnostics))
+
+    def test_lock_and_transport_failures_record_stage_without_sensitive_details(self):
+        self.channel.fail.add("lock-configuration")
+        with self.assertRaises(DriverError):
+            self.driver.preview(["set system host-name new"])
+        trace = "\n".join(self.driver.transaction_diagnostics)
+        self.assertIn("lock-configuration: rejected", trace)
+        self.assertNotIn("sensitive-device-detail", trace)
+        self.channel.fail.clear()
+        self.channel.fail_receive = True
+        with self.assertRaises(DriverError):
+            self.driver.preview(["set system host-name new"])
+        self.assertIn("lock-configuration: transport failure", "\n".join(self.driver.transaction_diagnostics))
+
     def test_lock_failure_does_not_unlock_unowned_lock(self):
         self.channel.fail.add("lock-configuration")
         with self.assertRaises(DriverError):
@@ -411,11 +504,67 @@ class DriverTests(unittest.TestCase):
 
     def test_unlock_failure_closes_connection_after_commit(self):
         self.channel.fail.add("unlock-configuration")
-        with self.assertRaisesRegex(DriverError, "cleanup failed"):
+        with self.assertRaisesRegex(PartialApply, "acknowledged the commit"):
             self.driver.apply(["set system host-name new"], self.channel.committed_config)
         self.assertIn("commit", self.channel.calls)
         self.assertNotIn("discard", self.channel.calls)
         self.assertTrue(self.channel.closed)
+
+    def test_commit_has_longer_reply_deadline_and_restores_read_timeout(self):
+        original = self.driver._receive
+        observed = []
+
+        def receive():
+            observed.append((self.channel.calls[-1], self.driver.timeout))
+            return original()
+
+        with patch.object(self.driver, "_receive", side_effect=receive):
+            self.driver.apply(["set system host-name new"], self.channel.committed_config)
+        self.assertIn(("commit", 120), observed)
+        self.assertIn(("get-config", 3), observed)
+        self.assertIn(("check", 3), observed)
+        self.assertEqual(self.driver.timeout, 3)
+        self.assertIn("waiting up to 120 seconds", "\n".join(self.driver.transaction_diagnostics))
+
+    def test_safe_transaction_progress_is_reported_before_commit_reply(self):
+        progress = []
+        self.driver.progress_callback = progress.append
+        receive = self.driver._receive
+
+        def check_reply():
+            if self.channel.calls[-1] == "commit":
+                self.assertTrue(any("waiting up to 120 seconds" in message for message in progress))
+            return receive()
+
+        with patch.object(self.driver, "_receive", side_effect=check_reply):
+            self.driver.apply(["set system host-name new"], self.channel.committed_config)
+        self.assertTrue(any("commit-check: completed" in message for message in progress))
+        self.assertTrue(any("unlock-configuration: completed" in message for message in progress))
+        self.assertNotIn("host-name new", "\n".join(progress))
+    def test_lost_commit_reply_is_uncertain_and_never_retried_or_discarded(self):
+        original = self.channel.sendall
+
+        def send(raw):
+            original(raw)
+            if self.channel.calls[-1] == "commit":
+                self.channel.fail_receive = True
+
+        self.channel.sendall = send
+        with self.assertRaisesRegex(PartialApply, "acknowledgement was lost"):
+            self.driver.apply(["set system host-name new"], self.channel.committed_config)
+        self.assertIn("host-name new", self.channel.committed_config)
+        self.assertEqual(self.channel.calls.count("commit"), 1)
+        self.assertNotIn("discard", self.channel.calls)
+        self.assertNotIn("unlock-configuration", self.channel.calls)
+        self.assertTrue(self.channel.closed)
+        self.assertEqual(self.driver.timeout, 3)
+
+    def test_explicit_commit_rejection_remains_safe_to_restage(self):
+        self.channel.fail.add("commit")
+        with self.assertRaises(DriverError) as error:
+            self.driver.apply(["set system host-name new"], self.channel.committed_config)
+        self.assertNotIsInstance(error.exception, PartialApply)
+        self.assertEqual(self.channel.calls[-2:], ["discard", "unlock-configuration"])
 
     def test_restore_loads_override_not_cli(self):
         config = "system {\n host-name restored;\n}\n"

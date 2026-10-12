@@ -6,7 +6,8 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
-from django.http import JsonResponse
+from django.db.models import Q
+from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
@@ -34,6 +35,14 @@ def viewer_job(job):
         return False
 
 
+def action_response(request, *args, **kwargs):
+    response = redirect(*args, **kwargs)
+    if request.headers.get("X-Live-Action") != "true":
+        return response
+    notices = [{"text": str(message), "tags": message.tags} for message in messages.get_messages(request)]
+    return JsonResponse({"redirect": response.url, "messages": notices})
+
+
 def device_for(request, pk, role="viewer"):
     switch = get_object_or_404(Switch, pk=pk)
     if not can_access(request.user, switch, role):
@@ -51,7 +60,10 @@ def detail_context(request, switch):
     except DriverError:
         capabilities = frozenset()
     operator = can_access(request.user, switch, "operator")
-    jobs = switch.jobs.all()
+    jobs = switch.jobs.filter(~Q(action="sync") | Q(status="failed"))
+    last_successful_sync = switch.jobs.filter(
+        action="sync", status="success", completed_at__isnull=False,
+    ).order_by("-completed_at", "-pk").values_list("completed_at", flat=True).first()
     if not operator:
         jobs = jobs.filter(action__in=READ_ACTIONS)
     snapshot = switch.snapshot
@@ -62,8 +74,9 @@ def detail_context(request, switch):
         "device_admin": can_access(request.user, switch, "admin"),
         "snapshot_text": json.dumps(snapshot, indent=2, ensure_ascii=False),
         "jobs": list(jobs[:30]) if operator else [job for job in jobs[:100] if viewer_job(job)][:30],
+        "last_successful_sync": last_successful_sync,
         "revisions": switch.revisions.all()[:30] if operator else [],
-        "changes": switch.changes.exclude(status__in=["discarded", "committed"])[:20] if operator else [],
+        "changes": list(switch.changes.exclude(status__in=["discarded", "committed"])) if operator else [],
         "web_driver": registered is not None and registered.transport == "http",
         "managed_driver": switch.driver in {"netgear_gs108tv2", "netgear_plus", "hp_comware"},
         "web_configuration_warning": switch.snapshot.get("configuration_warning", "") if isinstance(switch.snapshot, dict) else "",
@@ -80,7 +93,14 @@ def detail_context(request, switch):
                      and (operator or value in OPERATIONAL_SECTIONS)],
     }
     context["change_form"].fields.pop("immediate")
+    context["pending_change_count"] = sum(change.status == "pending" for change in context["changes"])
     if operator:
+        for change in context["changes"]:
+            change.remove_label = "Remove staged item" if change.editor_data and change.editor_data.get("key") is None else "Revert staged change"
+            if change.status == "uncertain":
+                change.remove_label = "Remove uncertain change"
+            change.can_remove = change.status in {"pending", "uncertain"}
+            change.can_edit = False
         from .configuration import SECTIONS, current_state
         if context["web_driver"]:
             from .netgear_configuration import SECTIONS
@@ -93,6 +113,24 @@ def detail_context(request, switch):
             if registered is None:
                 raise DriverError("No registered profile is available for this switch.")
             revision, state = current_state(switch)
+            from .staged_editing import details
+            for change in context["changes"]:
+                if change.status == "pending":
+                    try:
+                        data = details(switch, change, revision, state)
+                        change.can_edit = True
+                        if data["key"] is None:
+                            change.remove_label = "Remove staged item"
+                    except DriverError as error:
+                        change.edit_error = str(error)
+            from .staged_configuration import projected_state
+            state, context["staged_configuration_warnings"] = projected_state(switch, revision, state)
+            change_controls = {change.pk: change for change in context["changes"]}
+            for rows in state.values():
+                if isinstance(rows, list):
+                    for row in rows:
+                        if isinstance(row, dict) and row.get("staged_changes"):
+                            row["staged_changes"] = [change_controls[item["pk"]] for item in row["staged_changes"]]
             context["configuration_sections"] = [
                 {"slug": slug, "label": label, "rows": state[slug], "can_add": slug in registered.configuration_add_sections}
                 for slug, label in SECTIONS.items() if slug in registered.configuration_sections
@@ -128,6 +166,21 @@ def configuration_editor(request, pk, section):
         messages.error(request, str(error))
         return redirect("switch-detail", pk=pk)
     key = request.GET.get("item")
+    editing = None
+    editor_details = None
+    if request.GET.get("change"):
+        if not request.GET["change"].isascii() or not request.GET["change"].isdigit():
+            raise Http404
+        editing = get_object_or_404(ConfigChange, pk=request.GET["change"], switch=switch)
+        try:
+            from .staged_editing import details
+            editor_details = details(switch, editing, revision, state)
+            if editor_details["section"] != section:
+                raise DriverError("This staged change belongs to a different editor.")
+            key = editor_details["key"]
+        except DriverError as error:
+            messages.error(request, str(error))
+            return redirect(f"{reverse('switch-detail', args=[pk])}#configuration-review")
     if section not in state.get("_supported_sections", registered.configuration_sections):
         raise PermissionDenied
     row = next((item for item in state[section] if item["key"] == key), None)
@@ -139,7 +192,10 @@ def configuration_editor(request, pk, section):
         return redirect("switch-detail", pk=pk)
     try:
         form = EditorForm(section, state, row, request.POST if request.method == "POST" else None,
-                          revision.pk, request.GET.get("kind", "ntp"))
+                          revision.pk, editor_details["kind"] if editor_details else request.GET.get("kind", "ntp"))
+        if editing:
+            from .staged_editing import prefill
+            prefill(form, editing, editor_details)
     except DriverError as error:
         messages.error(request, str(error))
         return redirect("switch-detail", pk=pk)
@@ -150,7 +206,7 @@ def configuration_editor(request, pk, section):
             if form.cleaned_data.get("operation") == "delete" and not request.POST.get("confirm_delete"):
                 raise DriverError("Confirm deletion before staging this change.")
             change = stage_editor(switch, form, request.user)
-            messages.success(request, f"Change #{change.pk} staged. Review and commit it when ready.")
+            messages.success(request, f"Change #{change.pk} {'updated' if editing else 'staged'}. Review and commit it when ready.")
             return redirect(f"{reverse('switch-detail', args=[pk])}#configuration-review")
         except DriverError as error:
             form.add_error(None, str(error))
@@ -159,7 +215,25 @@ def configuration_editor(request, pk, section):
         "revision": revision, "deletable": row and "operation" in form.fields,
         "web_driver": registered.transport == "http",
         "comware_driver": switch.driver == "hp_comware",
+        "editing_change": editing,
     })
+
+
+@login_required
+@require_GET
+def edit_staged_change(request, pk, change_id):
+    from .configuration import current_state
+    from .drivers.base import DriverError
+    from .staged_editing import details
+    switch = device_for(request, pk, "operator")
+    change = get_object_or_404(ConfigChange, pk=change_id, switch=switch)
+    try:
+        revision, state = current_state(switch)
+        data = details(switch, change, revision, state)
+    except DriverError as error:
+        messages.error(request, str(error))
+        return redirect(f"{reverse('switch-detail', args=[pk])}#configuration-review")
+    return redirect(f"{reverse('configuration-editor', args=[pk, data['section']])}?change={change.pk}")
 
 
 @login_required
@@ -176,6 +250,7 @@ def inventory(request, pk=None):
         raise PermissionDenied
     switch = device_for(request, pk, "admin") if pk else None
     form = SwitchForm(request.POST or None, instance=switch)
+    form.fields["credential"].widget.attrs.pop("data-live-url", None)
     if request.method == "POST" and form.is_valid():
         with transaction.atomic():
             saved = form.save()
@@ -184,7 +259,11 @@ def inventory(request, pk=None):
         from .drivers.registry import driver_class
         messages.success(request, f"Inventory saved using {driver_class(saved.driver).profile_label or saved.driver}. Synchronize to verify the device model and collect its supported settings.")
         return redirect("dashboard")
-    return render(request, "switches/form.html", {"form": form, "title": "Edit switch" if pk else "Add switch"})
+    return render(request, "switches/form.html", {
+        "form": form, "title": "Edit switch" if pk else "Add switch",
+        "form_live_url": f"/ws/live/inventory-form/{pk}/" if pk else "/ws/live/inventory-form/",
+        "form_live_bound": form.is_bound,
+    })
 
 
 @login_required
@@ -198,13 +277,13 @@ def delete_inventory(request, pk):
             raise PermissionDenied
         if not DeleteForm(request.POST).is_valid():
             messages.error(request, "Confirm inventory deletion before proceeding.")
-            return redirect("switch-detail", pk=pk)
+            return action_response(request, "switch-detail", pk=pk)
         if switch.jobs.filter(status__in=("queued", "running")).exists():
             messages.error(request, "This device has queued or running jobs. Wait for them to finish before deleting it.")
-            return redirect("switch-detail", pk=pk)
+            return action_response(request, "switch-detail", pk=pk)
         switch.delete()
     messages.success(request, "Device inventory and associated history deleted.")
-    return redirect("dashboard")
+    return action_response(request, "dashboard")
 
 
 @login_required
@@ -226,7 +305,7 @@ def https_setup(request, pk):
         messages.success(request, "HTTPS operation queued. See job output and the certificate approval panel.")
     except ValueError as error:
         messages.error(request, str(error))
-    return redirect("switch-detail", pk=pk)
+    return action_response(request, "switch-detail", pk=pk)
 
 
 @login_required
@@ -264,13 +343,13 @@ def action(request, pk):
         form = MonitorForm(request.POST)
         if not form.is_valid():
             messages.error(request, "Choose a valid monitor section.")
-            return redirect("switch-detail", pk=pk)
+            return action_response(request, "switch-detail", pk=pk)
         payload = {"section": form.cleaned_data["section"]}
     elif action in {"show", "ping", "traceroute"}:
         form = DiagnosticForm(request.POST)
         if not form.is_valid():
             messages.error(request, "Enter a valid command or target.")
-            return redirect("switch-detail", pk=pk)
+            return action_response(request, "switch-detail", pk=pk)
         payload = {"command" if action == "show" else "target": form.cleaned_data["value"]}
         if action == "ping" and form.cleaned_data["count"] is not None:
             payload["count"] = form.cleaned_data["count"]
@@ -285,7 +364,7 @@ def action(request, pk):
         messages.success(request, "Operation queued. Results will appear in job history.")
     except ValueError as exc:
         messages.error(request, str(exc))
-    return redirect("switch-detail", pk=pk)
+    return action_response(request, "switch-detail", pk=pk)
 
 
 @login_required
@@ -306,9 +385,14 @@ def stage(request, pk):
             ) if section else form.cleaned_data["commands"]
             services.stage_change(switch, commands, request.user, reason=form.cleaned_data.get("reason", ""))
             messages.success(request, "Change staged. Preview before committing.")
-            return redirect("switch-detail", pk=pk)
+            return action_response(request, "switch-detail", pk=pk)
         except (ValueError, DriverError) as exc:
             form.add_error(None, str(exc))
+    if request.headers.get("X-Live-Action") == "true":
+        return JsonResponse({"messages": [
+            {"text": f"{field}: {error}", "tags": "error"}
+            for field, errors in form.errors.items() for error in errors
+        ]}, status=400)
     return render(request, "switches/form.html", {"form": form, "title": "Stage configuration", "builder_section": section})
 
 
@@ -318,7 +402,7 @@ def change_action(request, pk, change_id):
     switch = device_for(request, pk, "operator")
     change = get_object_or_404(ConfigChange, pk=change_id, switch=switch)
     action = request.POST.get("action")
-    if action not in {"preview", "apply", "discard"}:
+    if action not in {"preview", "apply", "discard", "verify"}:
         raise PermissionDenied
     try:
         if action == "discard":
@@ -328,7 +412,7 @@ def change_action(request, pk, change_id):
         messages.success(request, "Change operation queued." if action != "discard" else "Change discarded.")
     except ValueError as exc:
         messages.error(request, str(exc))
-    return redirect("switch-detail", pk=pk)
+    return action_response(request, "switch-detail", pk=pk)
 
 
 @login_required
@@ -347,7 +431,7 @@ def pending_action(request, pk):
             messages.success(request, "Combined pending-change operation queued. See job output for results.")
     except ValueError as error:
         messages.error(request, str(error))
-    return redirect(f"{reverse('switch-detail', args=[pk])}#configuration-review")
+    return action_response(request, f"{reverse('switch-detail', args=[pk])}#configuration-review")
 
 
 @login_required
@@ -356,6 +440,10 @@ def pending_action(request, pk):
 def revision(request, pk, revision_id):
     switch = device_for(request, pk, "operator")
     revision = get_object_or_404(ConfigRevision, switch=switch, pk=revision_id)
+    return render(request, "switches/revision.html", revision_context(switch, revision, request))
+
+
+def revision_context(switch, revision, request):
     previous = switch.revisions.filter(pk__lt=revision.pk).first()
     diff = "".join(difflib.unified_diff(
         previous.config.splitlines(keepends=True) if previous else [],
@@ -363,10 +451,10 @@ def revision(request, pk, revision_id):
         fromfile=f"Revision {previous.pk}" if previous else "Empty",
         tofile=f"Revision {revision.pk}",
     ))
-    return render(request, "switches/revision.html", {
+    return {
         "switch": switch, "revision": revision, "diff": diff,
         "supports_restore": detail_context(request, switch)["supports_restore"],
-    })
+    }
 
 
 @login_required
@@ -379,7 +467,7 @@ def restore(request, pk, revision_id):
         messages.success(request, "Restore queued.")
     except ValueError as exc:
         messages.error(request, str(exc))
-    return redirect("switch-detail", pk=pk)
+    return action_response(request, "switch-detail", pk=pk)
 
 
 @login_required
@@ -407,9 +495,14 @@ def discovery(request):
                 messages.error(request, run.error or "Discovery failed to queue. Check Redis and worker logs.")
             else:
                 messages.success(request, "Bounded discovery queued.")
-            return redirect("discovery")
+            return action_response(request, "discovery")
         except ValueError as exc:
             form.add_error(None, str(exc))
+    if request.method == "POST" and request.headers.get("X-Live-Action") == "true":
+        return JsonResponse({"messages": [
+            {"text": f"{field}: {error}", "tags": "error"}
+            for field, errors in form.errors.items() for error in errors
+        ]}, status=400)
     runs = DiscoveryRun.objects.all() if request.user.is_superuser else DiscoveryRun.objects.filter(created_by=request.user)
     from .profiles import choices, discovery_runs
     return render(request, "switches/discovery.html", {
@@ -492,4 +585,6 @@ def credential_edit(request, pk=None):
         return redirect("credentials")
     return render(request, "switches/form.html", {
         "form": form, "title": "Edit credential" if pk else "Add credential",
+        "form_live_url": f"/ws/live/credential-form/{pk}/" if pk else "/ws/live/credential-form/",
+        "form_live_bound": form.is_bound,
     })
