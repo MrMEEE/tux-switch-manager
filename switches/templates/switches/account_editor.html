@@ -1,0 +1,12 @@
+{% extends 'switches/base.html' %}
+{% block content %}
+<a class="back" href="{% url 'users' %}">Back to users</a>
+<section class="panel slim form-panel"><h1>{{ title }}</h1>
+<form method="post" data-live-submit data-account-editor data-confirm="Save these account changes? Permission changes take effect for live sessions and queued device jobs.">
+  {% csrf_token %}
+  <div data-live-url="/ws/live/user-form/{% if target %}{{ target.pk }}/{% endif %}" data-editor-token="{{ editor_token }}" data-editor-kind="{{ editor_kind }}" data-live-bound="{{ form.is_bound|yesno:'true,false' }}">
+    {% include 'switches/user_form.html' %}
+  </div>
+  <div class="form-actions"><button type="submit"{% if editor_stale %} disabled{% endif %}>Save</button></div>
+</form></section>
+{% endblock %}

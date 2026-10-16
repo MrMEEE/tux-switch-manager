@@ -57,6 +57,7 @@ def execute_https(switch, driver, job):
                 raise DriverError("HTTPS approval changed during verification. No transport change was saved.")
             Switch.objects.filter(pk=switch.pk).update(
                 management_protocol="https", port=pending["port"], tls_fingerprint=pending["fingerprint"], https_pending={},
+                reachable=None, last_checked=None,
             )
         switch.management_protocol, switch.port, switch.tls_fingerprint = "https", pending["port"], pending["fingerprint"]
         synchronize(switch, secure, "https", job.created_by)

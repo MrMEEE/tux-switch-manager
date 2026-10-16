@@ -1,0 +1,5 @@
+{% extends 'switches/base.html' %}
+{% block content %}
+<div class="heading"><div><p class="eyebrow">ADMINISTRATION</p><h1>Users</h1><p class="muted">Superusers manage accounts and global permissions. Deactivate accounts to retain their audit history.</p></div><a class="button" href="{% url 'user-add' %}">Add account</a></div>
+<section class="panel table-scroll" data-live-url="/ws/live/users/">{% include 'switches/user_data.html' %}</section>
+{% endblock %}

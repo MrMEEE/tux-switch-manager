@@ -1,0 +1,10 @@
+{% extends 'switches/base.html' %}
+{% block content %}
+<div class="heading"><div><p class="eyebrow">ADMINISTRATION</p><h1>Switch access</h1><p class="muted">Manage explicit Viewer, Operator and Administrator grants. Only superusers can manage accounts or global permissions.</p></div></div>
+<section class="panel form-panel"><h2>Grant, change or remove access</h2>
+<form method="post" data-live-submit data-confirm="Update this user's access to the selected switch? Removed access takes effect immediately in live sessions.">
+  {% csrf_token %}<div data-live-url="/ws/live/access-form/" data-live-bound="{{ form.is_bound|yesno:'true,false' }}">{% include 'switches/form_fields.html' %}</div>
+  <button type="submit">Update access</button>
+</form></section>
+<section class="panel table-scroll" data-live-url="/ws/live/access/">{% include 'switches/access_data.html' %}</section>
+{% endblock %}

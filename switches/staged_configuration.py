@@ -140,18 +140,18 @@ def projected_state(switch, revision, state):
     marked = {}
     for change in changes:
         if change.status == "uncertain":
-            warnings.append(f"Change #{change.pk} has an uncertain device outcome. Synchronize and reconcile it; its values are not projected.")
+            warnings.append(f"Change #{change.pk} may already be on the switch. Use Verify outcome in Review and Commit before doing anything else. The table does not show this pending change; it shows the latest synchronized settings instead.")
             continue
         if change.base_revision_id != revision.pk:
-            warnings.append(f"Change #{change.pk} uses an older baseline. Synchronize and restage it; its values are not projected.")
+            warnings.append(f"Change #{change.pk} was saved before the latest configuration was synchronized. The table does not show this pending change; it shows the latest synchronized settings instead. See Review and Commit for steps to recreate the change.")
             continue
         if change.status not in {"pending", "previewing", "applying"}:
-            warnings.append(f"Change #{change.pk} is not available for a staged preview.")
+            warnings.append(f"Change #{change.pk} cannot currently be shown in the configuration table. Check its status in Review and Commit.")
             continue
         try:
             candidate, rows = project(switch.driver, config, change.commands.splitlines())
         except DriverError:
-            warnings.append(f"Change #{change.pk} cannot be represented safely in the configuration table. Inspect it in Review and Commit.")
+            warnings.append(f"Change #{change.pk} cannot be shown reliably in the configuration table. Review its generated commands in Review and Commit; the table shows synchronized settings for this change.")
             continue
         for section, previous in result.items():
             if not isinstance(previous, list) or section not in rows:

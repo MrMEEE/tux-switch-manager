@@ -38,6 +38,24 @@ class LiveWebsocketTests(TransactionTestCase):
         suffix = f"{topic}/{pk}/" if pk is not None else f"{topic}/"
         return WebsocketCommunicator(application, f"/ws/live/{suffix}{query}", headers=headers)
 
+    def test_external_change_notifications_arrive_in_fleet_and_workspace(self):
+        from .services import record_revision
+        record_revision(self.switch, "approved")
+
+        async def check():
+            fleet = self.communicator("fleet")
+            workspace = self.communicator("switch", self.switch.pk)
+            for socket in (fleet, workspace):
+                self.assertTrue((await socket.connect())[0])
+                self.assertNotIn("External configuration change", (await socket.receive_json_from())["html"])
+            await database_sync_to_async(record_revision)(self.switch, "externally edited private configuration")
+            for socket in (fleet, workspace):
+                html = (await socket.receive_json_from())["html"]
+                self.assertIn("External configuration change", html)
+                self.assertNotIn("externally edited private configuration", html)
+                await socket.disconnect()
+        async_to_sync(check)()
+
     async def event(self, resource):
         await get_channel_layer().group_send("live.updates", {
             "type": "live.updated", "resource": resource, "password": "never-forward-this",

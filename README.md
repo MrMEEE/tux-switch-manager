@@ -2,14 +2,53 @@
 
 A multi-switch management application built with Python, Django, Celery/Beat and
 Django Channels. [Switchman](https://github.com/MrMEEE/switchman) is the functional reference; there is intentionally
-no switch image, faceplate mapping or image-detection integration. The initial
-driver targets Juniper EX3300-24P and EX3300-48P, including older non-ELS Junos.
+no switch image, faceplate mapping or image-detection integration. Implemented
+profiles cover Juniper EX3300, NETGEAR GS108Tv2 and GS110EMX, and experimental
+HP V1910 / Comware 5 support; validation status is listed below.
+
+## Screenshots
+
+Captured from the running application. Network identifiers, interface descriptions
+and account details are masked where appropriate; no configuration or access
+changes were submitted to create these screenshots.
+
+### Fleet overview
+
+See device reachability, supported profiles and the latest synchronization times
+in one place.
+
+![Fleet overview with online switches and live update indicators](screenshots/fleet.png)
+
+### Ports
+
+Check observed link status alongside configured administrative state, VLAN
+membership and link aggregation assignments.
+
+![Ports overview showing operational link status and configuration actions](screenshots/ports.png)
+
+### Link aggregation editor
+
+Choose member interfaces, VLAN membership and LACP settings. Saving stages the
+change for review rather than applying it immediately.
+
+![Link aggregation editor with member interface selection and safety warning](screenshots/link-aggregation-editor.png)
+
+### Switch access
+
+Manage per-switch Viewer, Operator and Administrator grants independently of
+global account permissions.
+
+![Switch access management form and current role grants](screenshots/switch-access.png)
 
 ## Features
 
 - Fleet inventory, per-device access and cached operational/configuration views.
 - System, interface, VLAN, LAG, static-route, security and service configuration;
   validated manual `set`/`delete` commands for advanced settings.
+  LAG member selectors show interface descriptions alongside interface names
+  when creating or editing an aggregate.
+  The Ports overview shows observed Up/Down/Unknown link status separately from
+  staged administrative settings, refreshed through WebSockets after each sync.
 - Stage changes, preview and commit or discard. Immediate apply is disabled.
   Configuration tables show locally planned values with a **Staged** pencil badge,
   including new items and deletions. Review staged items before committing;
@@ -18,12 +57,24 @@ driver targets Juniper EX3300-24P and EX3300-48P, including older non-ELS Junos.
   The display is local only and does not modify synchronized snapshots or devices.
   Pending GUI changes can be reopened with **Edit staged change**; the form
   prefills the staged values and saving replaces the same change, rather than
-  adding another. **Remove staged item** discards an addition; **Revert staged
+  adding another. Opening the ordinary editor for that same object also resumes
+  its pending change, including all previously saved settings. Save, Cancel and
+  Back return to the configuration section being edited (for example, Ports or
+  VLANs), rather than switching to Review and Commit. Saving combines
+  the intended settings into one change generated against the synchronized
+  configuration revision, not a concatenation of conflicting command batches.
+  Older tabs cannot create duplicates or overwrite a pending change without
+  its current edit token; live updates flag those editors as outdated.
+  Different objects remain separate. Running, uncertain and outdated changes
+  are not merged. Existing duplicate records require explicit review and
+  discarding duplicates; they are never silently combined or deleted.
+  **Remove staged item** discards an addition; **Revert staged
   change** discards an edit/deletion and restores the synchronized display.
   These actions discard the whole staged change, including related items, and
   never write to the switch. Running, uncertain and outdated changes cannot be
-  edited; uncertain changes must be reconciled before restaging. Older manual
-  multi-item batches may require removal and restaging through the GUI.
+  edited; use Verify outcome for uncertain changes before creating replacements.
+  Older manual multi-item batches may require discarding the pending change and
+  saving separate new staged changes through Current configuration.
   Configuration-table actions use compact review, edit, remove and revert icons
   with hover tooltips and accessible labels.
   Confirmations use in-app modals with Cancel/Escape support, not browser
@@ -53,192 +104,28 @@ driver targets Juniper EX3300-24P and EX3300-48P, including older non-ELS Junos.
   Revisions are created when the configuration changes, including out-of-band
   changes detected by polling. Commits and restores record their initiating user.
 - A vendor-independent driver contract and settings-based plugin registry.
-- Web-only NETGEAR GS108Tv2 legacy GUI support, including encrypted password-only
-  credentials, monitoring and staged graphical edits, with explicit HTTP and
-  non-atomic-write warnings.
+- Juniper NETCONF, NETGEAR legacy/Plus web profiles, and experimental HP V1910
+  SSH2 support, with profile-specific capabilities and safety warnings.
 - A responsive dark workspace matching TuxCMDB's sidebar, blue accents and green
   Tux branding, with collapsible navigation and locally served theme assets.
 
-## HP V1910 / Comware 5 (experimental SSH2)
+## Supported switches
 
-Choose **HP V1910 / Comware 5 (SSH2, live unverified)** (`hp_comware`), port
-**22**, with a saved username/password credential. Discovery and manual
-automatic matching recommend it from a V1910 model or Comware 5.20 banner;
-authenticated collection still requires a matching V1910 model and Comware 5.
-It is not a generic Aruba/Comware profile.
+All four implemented driver profiles are listed below. Live collection testing
+does not certify every configuration write; see each model's notes for the exact
+validation scope, setup instructions and limitations.
 
-**Live compatibility remains unverified.** The reference HP V1910-24G-PoE
-(365W), JE007A, running 5.20 Release 1108P01 at `192.168.60.2`, rejected SSH
-version negotiation before authentication. An `SSH-1.99` banner does not prove
-SSH1-only support. If SSH is unavailable, enable SSH and account access using
-the vendor documentation. If SSH2 negotiation fails, check SSH settings and
-upgrade to firmware supporting SSH2 for the exact model. The app does not
-upgrade firmware or fall back to SSH1/Telnet.
+| Switch / model | Profile and transport | Current testing status | Details |
+| --- | --- | --- | --- |
+| Juniper EX3300-24P | `juniper_ex` · NETCONF over SSH | Live synchronization tested; automated configuration/transaction tests | [Juniper EX](docs/juniper-ex.md) |
+| Juniper EX3300-48P | `juniper_ex` · NETCONF over SSH | Live synchronization tested; automated configuration/transaction tests | [Juniper EX](docs/juniper-ex.md) |
+| NETGEAR GS108Tv2 | `netgear_gs108tv2` · legacy web GUI | Live collection; automated managed-write tests | [GS108Tv2](docs/netgear-gs108tv2.md) |
+| NETGEAR GS110EMX | `netgear_plus` · web GUI | Live collection and reversible name change; port/VLAN writes not live-tested | [GS110EMX](docs/netgear-gs110emx.md) |
+| HP V1910 Comware 5 family (8/16/24/48G, including PoE variants) | `hp_comware` · SSH2 CLI | Experimental; fixture-tested, live compatibility unverified | [HP V1910](docs/hp-v1910.md) |
 
-Unknown SSH host keys use the existing fingerprint-approval dialog; changed
-keys fail closed. Full authorized CLI access is required. A restricted shell
-gets an explicit error; the app never uses undocumented CLI unlock passwords.
-
-The profile provides configuration/facts collection and CLI monitoring for
-interfaces, VLANs, ARP, MAC, LLDP, PoE, STP and routes where firmware/account
-permissions allow it. GUI editors prefill system name, existing VLAN
-descriptions, physical-port descriptions/admin state and safely represented
-access/trunk membership/PVID. Advanced/hybrid/LAG switching is preserved and
-not editable. VLAN creation/deletion, LAG editing, management addresses,
-arbitrary CLI, reboot, restoration and commit-all are unavailable. Unsupported
-or ambiguous layouts fail explicitly, including multiline banners.
-
-Changes stay locally staged until review and explicit commit. Writes are
-immediate, sequential and **non-atomic**, with no remote lock or rollback.
-Fresh full-configuration comparison guards stale baselines and full readback
-checks the plan; unrelated command order is preserved. A failed or expired
-apply remains **uncertain**, with no automatic retry. Inspect the native CLI,
-synchronize and restage deliberately. Startup configuration is not saved.
-Port/admin/VLAN changes can disconnect management; use a maintenance window.
-No new SSH dependency is needed: the profile uses the existing Paramiko SSH2
-client. Fixture tests are not a substitute for post-upgrade live verification.
-
-## Web-only NETGEAR GS108Tv2
-
-Choose **NETGEAR GS108Tv2 (legacy web GUI)** (`netgear_gs108tv2`) in inventory or discovery and
-use management port **80** (blank uses the driver default). Create a saved
-credential with the switch password; its username may be blank and is ignored
-by this driver. Verify and Add authenticates directly without rescanning or
-requesting SSH host-key approval.
-
-This adapter targets the legacy GS108Tv2 interface observed on firmware 5.0.0.8,
-not every NETGEAR model. It reads system metadata, eight ports and existing VLAN
-membership, including four LAG membership slots. The preferred GUI prefills
-system name/location/contact, port description/admin state/speed/power-saving/
-link-trap/frame-size settings, and tagged/untagged VLAN membership. Changes stay
-staged until explicitly committed. VLAN creation/deletion, PVID, LAG configuration,
-CLI diagnostics, reboot and restore are not supported; use the device GUI.
-Unrecognized model/page layouts fail closed instead of guessing.
-
-**Safety differences from Junos:**
-
-- HTTP sends passwords and configuration unencrypted. Use an isolated, trusted
-  management network. The device workspace offers device administrators
-  **Enable / inspect HTTPS**. This explicitly confirmed, asynchronous operation
-  enables the device HTTPS service (disabling SSLv3 when enabling it), preserving
-  its configured port and timeouts. It does not disable HTTP or save startup
-  configuration. If HTTPS is already enabled, it only inspects the endpoint.
-- Before using HTTPS, the client requires TLS 1.2 or newer and displays the
-  certificate SHA-256 fingerprint for independent verification. Choose **Trust
-  certificate and use HTTPS** to approve that exact certificate. The app
-  authenticates and reads back over pinned HTTPS before changing its saved
-  protocol/port. Pin mismatch blocks sending any credentials. No silent HTTP
-  fallback, obsolete TLS, weak-cipher opt-in or blanket certificate bypass is
-  provided. Firmware that only supports TLS 1.0 needs upgrading; the job explains
-  that HTTPS may have been enabled but the app transport remains unchanged.
-- HTTPS setup requires device-admin permission and rechecks it at job execution.
-  Certificate approval is bound to the device address, port and inspected
-  certificate, and is rechecked before use. Changing inventory endpoints clears
-  the old approval/pin rather than reusing another device's trust.
-- The adapter disables proxy use, refuses redirects and keeps session cookies in
-  memory, never in a shared file or logs.
-- Revisions contain only managed fields, not a full restorable configuration.
-  Preview is a local planned diff, not a device candidate or commit-check.
-- Writes take effect immediately, without a remote lock, atomic transaction or
-  rollback. Commit-all is disabled. Commit one item, synchronize and restage
-  remaining edits against the new baseline.
-- The adapter compares managed fields before writing and verifies readback
-  afterward. A failed/uncertain write is marked **uncertain**, not automatically
-  retried. Inspect actual state, synchronize, discard the uncertain change and
-  restage deliberately. Concurrent edits through the device GUI cannot be locked.
-- Startup persistence is not verified. After checking the applied changes, use
-  **Save Configuration** in the switch GUI. That device action can save *all*
-  previously applied changes, including changes made by other administrators.
-- VLAN/uplink/admin-state edits can disconnect management access. PVID is not
-  changed by the membership editor. Avoid traffic-affecting writes outside a
-  maintenance window.
-
-No additional dependency is needed. PyNetgearSwitchController was evaluated as
-a reference, but its GS108Ev3/GS105Ev2 CGI endpoints and authentication do not
-match this GS108Tv2 legacy interface; its code is not incorporated.
-
-## Automatic profiles and supported features
-
-### Legacy GS108Tv2 HTTPS troubleshooting
-
-For the legacy GS108Tv2 HTTPS flow, an explicit device rejection is reported
-separately from an uncertain network/readback failure. `Failed to set HTTPS
-Admin Mode` is a switch-side rejection: inspect its HTTPS Certificate Download
-setup and firmware support in the native GUI. Its old `TLS Version 1` label
-means TLS 1.0, not a guarantee of TLS 1.2 support. The app never enables legacy
-TLS or weak ciphers, and retains HTTP until modern TLS and certificate approval
-are verified.
-
-### NETGEAR Ethernet Plus / GS110EMX
-
-The `netgear_plus` web profile supports the **GS110EMX**, verified on firmware
-**1.0.1.4** with read-only collection and an approved reversible switch-name
-write/readback/restoration test. No live port, VLAN or management-address writes
-were used for validation. Discovery and manual automatic matching recognize the
-GS110EMX login page and use port 80 by default. Select a saved password-only
-credential. Other Plus models are not advertised as compatible until their
-page layouts and writes are verified.
-
-The adapter uses [py-netgear-plus](https://github.com/foxey/py-netgear-plus)
-0.6.4 (Apache-2.0) for its challenge-response login and system metadata parser.
-Its GS110EMX library profile is monitoring-only; the staged configuration
-adapter here uses the inspected native forms. HTTP requests remain bounded,
-proxy-free and redirect-refusing, with per-operation sessions and no persisted
-cookies or authentication tokens. HTTPS transport uses the existing strict
-TLS implementation; this profile does not offer automatic HTTPS enabling.
-
-Supported:
-
-- Ten-port link state, negotiated speed, MTU, RX/TX byte and CRC counters.
-- Prefilled switch name and port description, speed/admin state and flow
-  control editors.
-- Existing Advanced 802.1Q tagged/untagged/excluded membership and port PVID
-  editors. LAG members must have matching membership; aggregated-port settings
-  remain in the native LAG GUI.
-- Staged review, local preview, fresh managed-baseline comparison and readback
-  after applying. WebSocket updates use the normal switch synchronization flow.
-
-Changing VLAN modes, creating/deleting VLANs, configuring LAGs, changing
-management IP/DHCP, QoS, mirroring, firmware, reboot and startup-save operations
-are not exposed. If Advanced 802.1Q mode is inactive, VLAN/PVID editors are
-hidden without enabling or resetting anything. This is a managed-field
-baseline, not a full configuration backup. HTTP is unencrypted; writes are
-non-atomic, have no device lock or rollback, and a failed write/readback is
-marked **uncertain**, never automatically retried. Startup persistence is not
-verified. Management/uplink membership changes can disconnect access.
-
-The Junos VLAN editor supports the implicit `default` VLAN even when no
-`vlan-id` is present. It displays ID 1 as implicit and prefills the routed
-interface and addresses. Leaving ID blank preserves the implicit configuration;
-metadata/address edits do not add an explicit VLAN ID. Rename/deletion of this
-implicit VLAN remain unavailable, and management-address/membership changes
-still require staging and an explicit commit.
-
-Discovery and manual inventory creation default to **Automatic matching**.
-Public service fingerprints recommend a registered driver and transport port:
-the legacy GS108T web page selects the GS108Tv2 adapter, and Junos/Juniper
-evidence selects the EX3300 NETCONF adapter (preferring port 830 when detected).
-An explicit profile and custom port remain available. Manual matching probes
-only the entered address, not a network; the existing inventory permission is
-required. Discovery still requires the scanning permission.
-
-Vendor evidence is not model verification. Discovery shows one of:
-**supported profile / model verification pending**, **possible supported profile**,
-**no matching supported profile**, or **supported / model verified** after
-authenticated enrollment. Known incompatible models and NETGEAR OUI-only matches
-are not automatically assigned the GS108Tv2 adapter. Unknown devices stay visible
-but do not receive credentials in automatic authenticated discovery. Verify and
-Add uses the selected/matched profile directly, without a new discovery run;
-Juniper model validation and SSH key approval are unchanged. Manual inventory
-records are verified when synchronized.
-
-Drivers declare configuration sections, creatable sections, monitoring choices
-and operation capabilities. The workspace only shows those supported by the
-selected profile, and the server rejects forged requests for unsupported
-operations. For example, the GS108Tv2 adapter shows Ports, VLAN membership and
-System, not LAG/aggregation provisioning, routing or firewall editors. These are
-adapter capabilities, not a claim that the physical device lacks every hidden
-feature.
+Other models are not implied to be compatible. Automatic matching recommends a
+profile; authenticated model validation is still required. See
+[profile matching and capabilities](docs/switch-profiles.md).
 
 ## Run locally
 
@@ -325,65 +212,47 @@ If discovery reports that it could not queue, check `REDIS_URL` and
 failed runs are not automatically retried.
 
 Visit `http://127.0.0.1:8000/`. Add a switch, grant access, then synchronize it.
-The Django admin at `/admin/` manages users, groups, inventory permissions and
-per-switch access grants. Web mutations require authenticated sessions and CSRF
+Use **Users** (`/users/`) for superuser-only account creation, editing,
+deactivation, password resets, group membership and direct application
+permissions. Existing groups and their inherited permissions are retained.
+Use **Switch access** (`/access/`) to assign or remove per-switch roles;
+this requires `switches.manage_access`, not staff status. The Django admin
+route is no longer exposed. Web mutations require authenticated sessions and CSRF
 tokens; worker jobs recheck permissions before contacting devices.
+Account editors preserve drafts, warn and block stale saves, and never send
+stored passwords or hashes to the browser. Self-deactivation/demotion and
+removing the last active superuser are blocked. Passwords use Django's
+password validators; resetting a password invalidates that user's other
+sessions. Account and access lists update through permission-filtered WebSockets.
 
 Keep the generated keys stable between restarts. Store them in your deployment's
 secret manager, not in source control. Losing `CONFIG_ENCRYPTION_KEY` makes stored
 revisions, snapshots and job outputs unreadable. Back it up separately from the
 database. Changing `DJANGO_SECRET_KEY` invalidates existing sessions.
 
-### Connecting the Juniper test switches
+### Pending changes and newer configuration revisions
 
-Enable NETCONF on each switch using a trusted local administration connection:
+**Staged** means saved in the application but not yet applied to the switch.
+**Commit** applies the pending settings; **Discard**, **Remove staged item**
+and **Revert staged change** remove a pending change locally without changing
+the switch. The UI calls the configuration used to save a change its
+**configuration revision**, rather than a "baseline".
 
-```text
-set system services netconf ssh
-commit
-```
+When a newer revision is synchronized, an older pending change is not included
+in the configuration table. The table shows synchronized settings for that
+change instead. To recreate it safely:
 
-Use port **830** for the standard NETCONF listener. Port 22 may also support the
-`netconf` SSH subsystem on the installed Junos release; the inventory port is
-configurable. This driver requires NETCONF, not just an interactive CLI login.
-Use a Junos account with permissions for the intended RPCs.
+1. Review its generated commands and note the intended settings.
+2. Discard the old pending change using **Remove staged item** or
+   **Revert staged change**.
+3. Edit the item in **Current configuration** (or add it again), enter only
+   settings still needed, and save a new staged change.
+4. Review and preview the new change before committing.
 
-### Graphical configuration
+There is no automatic "Restage" action: copying an old change onto a newer
+configuration without review could overwrite newer settings. For uncertain
+changes, use **Verify outcome** first; they may already be on the switch.
 
-The device workspace's **Current configuration** is the preferred editor.
-Synchronize once after upgrading to collect committed NETCONF XML in addition
-to the encrypted text baseline. Tables show current ports, VLANs, LAGs, system
-settings, static routes, NTP/DNS servers, SNMP contact/location and community access, and simple IPv4
-firewall terms. Choose **Edit** for a prefilled form; switching/LACP modes and
-time zones use dropdowns, and VLAN/LAG membership uses checkbox selections from
-the switch's current inventory. New physical ports are not invented: they are
-taken from configuration and synchronized interface telemetry.
-
-Saving generates only changed settings and creates a staged change. It does
-not contact or commit to the switch. Use **Review and Commit**, preview the
-remote diff in job output, then commit when ready. Changes are committed
-individually or together with **Preview all pending / Commit all pending**.
-Combined changes must share the current baseline and are processed in staging
-order under one candidate lock. Discard-all affects pending changes only.
-Stale editor baselines are rejected, and remote apply still checks the exact
-committed baseline under the NETCONF configuration lock.
-
-NETCONF preview, commit and restore job outputs retain a bounded transaction
-trace, including the rejected RPC stage, allowlisted error codes, safe error
-categories, configuration line numbers when supplied, and candidate
-discard/unlock outcomes. Raw device error messages, configuration values and
-credentials are not logged. Existing failed jobs cannot recover details that
-were not saved. On older Junos releases, whole-unit deletions for LAG member
-attachment are expanded to explicit unit IDs under the candidate lock, including
-all configured units rather than assuming unit 0.
-
-Junos commit acknowledgements have a minimum 120-second reply deadline because
-flash writes and daemon activation can exceed normal read-RPC timeouts. A lost
-commit reply, failed post-commit unlock, or expired apply worker marks its change
-as **uncertain**, never pending/retryable. Synchronize and reconcile the actual
-device configuration before removing/restaging an uncertain change. The switch
-may already have committed even when its job is failed; no automatic commit
-retry is performed.
 Bulk preview/commit/discard controls are shown only when pending changes exist.
 Uncertain records remain visible with reconciliation instructions and cannot be
 committed again. Removing an uncertain record clears only the local staged
@@ -395,8 +264,9 @@ without loading a candidate, applying commands or committing. Matching settings
 resolve the record as committed with a **Verified applied** result in job history;
 this confirms current state, not which operation caused it. Missing/conflicting
 settings and unsupported comparisons retain the uncertain record and explain
-the result in the workspace and verification job. Remove/restage only the
-missing settings against the fresh baseline; there is no automatic retry.
+the result in the workspace and verification job. After review, remove the
+uncertain record and save a new staged change containing only missing settings
+using the latest synchronized configuration; there is no automatic retry.
 Verification results (time, revision, job and outcome) are encrypted at rest and
 permission-filtered. Comparisons ignore unrelated device changes; managed
 profiles compare the fields affected by their local plan, while supported Junos
@@ -414,8 +284,8 @@ Workspace actions and discovery submission update their results over WebSockets
 without reloading the page; HTTP POST still authorizes and queues each action.
 Navigation between pages and saving an editor remain explicit navigation.
 Read-only revision contents are immutable; their permissions and device identity
-still refresh live. Django's administration site is separate from these
-application live regions.
+still refresh live. Account management and switch grants use the same
+permission-filtered live regions.
 
 Device job history lists synchronization jobs only when they fail; queued,
 running and successful syncs remain stored and their individual output pages
@@ -430,73 +300,10 @@ Commit acknowledgement waits are explicitly shown; a running job with no final
 result is not necessarily waiting in the queue. Progress delivery failures are
 logged without interrupting or retrying a device transaction.
 
-The GUI preserves unrelated settings. Complex items it cannot represent are
-marked for the collapsed **Advanced · manual configuration** editor instead of
-being approximated. Configurations using groups, interface ranges, or inactive
-settings require Advanced. Firewall editing currently covers simple IPv4 terms,
-not filter attachment or term reordering. SNMP communities are not displayed in
-the graphical editor; existing community access/client restrictions can be edited
-without revealing the secret. New communities use a configured
-`SWITCH_CREDENTIAL_` reference, and unrestricted client lists require explicit
-acknowledgement. New LAG member attachments require acknowledgement because
-they remove existing unit configuration; unchanged members are not reattached.
-VLAN deletion is blocked while configured port memberships reference it.
-Current configuration tables update via WebSockets; an open edit form is kept
-outside live replacement so unsaved input is preserved.
 Configuration tabs sit above the panel and show only the selected section
 without reloading the page. The active tab survives WebSocket updates.
 Use Left/Right arrows or Home/End to navigate the tabs with a keyboard.
 Review and Commit is available as a separate tab.
-
-### Switchman configuration parity
-
-The reference audit covers Switchman commit
-`75e8e054399586289f489c12648411ca68468540`, including its forms, handlers,
-templates, integrations, models and tests. The features below are independently
-implemented using this project's NETCONF driver; reference SSH shell scripts,
-unsafe input sanitization and destructive whole-subtree replacements are not
-copied.
-
-| Switchman capability | Tux Switch Manager equivalent |
-| --- | --- |
-| Port enable/disable, description, MTU, speed, duplex, flow control and auto-negotiation | Prefilled Ports editor; only changed leaves are staged |
-| Access/trunk mode, VLAN membership and native VLAN | Dropdowns and membership selections in Ports and LAGs |
-| IPv4/IPv6 interface addresses | Existing-address checkboxes plus validated address/prefix additions |
-| LAG creation/deletion, member attachment/removal, LACP and minimum links | Link aggregation editor, with attachment-impact acknowledgement |
-| Enable/disable aggregate provisioning and device count | Aggregate device provisioning editor; configured LAGs cannot be removed accidentally |
-| VLAN ID/list/ranges, description and MAC aging | VLAN editor with validated ranges and overlapping-ID checks |
-| VLAN rename and interface membership assignment/removal | VLAN editor updates references; access-port replacement requires acknowledgement |
-| VLAN input/output filters and routed VLAN interface addresses | Filter selections and routed VLAN interface fields, supporting `vlan.N` and `irb.N` |
-| Hostname, domain, timezone, DNS and NTP | System and Services editors |
-| SNMP read-only/read-write communities and deletion | Services editor; secrets hidden, new communities use secret references |
-| Static routes and deletion | Static routes editor, including IPv6 |
-| Compare/commit/discard pending changes together | Review and Commit, including combined pending-change actions |
-| Manual set/delete and operational show commands, with reason | Advanced configuration and diagnostics; reasons retained for audit |
-| Ping/count, traceroute and reboot | Diagnostics and administrator-only reboot |
-| Device notes, monitoring enablement, SNMP timeout/port and active state | Inventory settings; manual synchronization is available when automatic monitoring is disabled |
-| Configuration/status synchronization and live SNMP interfaces | Background jobs and WebSocket state updates |
-| Alarms, ARP, BGP, chassis, interfaces, LLDP, MAC, OSPF, PoE, routing, STP, IGMP, 802.1X, port security and syslog monitoring | Monitoring and diagnostics buttons plus synchronized snapshot/job output |
-| LLDP configuration display; firewall, DHCP, 802.1X and port-security raw configuration | Current LLDP table and dedicated configuration-monitor actions; Advanced for manual edits |
-| User management and permissions | Django administration plus per-switch Viewer/Operator/Administrator roles and inventory/discovery/credential/access permissions |
-
-Switchman's STP, IGMP, DHCP, 802.1X and port-security configuration pages have no
-dedicated configuration handlers; their manual-command possibilities are retained,
-not presented as newly working graphical editors. Its LAG logging checkbox is
-unused by the backend and is not replicated as a misleading control. The optional
-Ansible show helper has no distinct UI capability; validated read-only NETCONF
-show commands provide the equivalent operation. Switchman's immediate-commit
-preference is deliberately excluded: edits always stage for Review and Commit.
-Its faceplate image, port-image mapping, image/layout editors and image-detection
-API integration are excluded. There are no reference export or rollback actions;
-this project's existing revision comparison/restoration remains available.
-
-Junos syntax is device-dependent. This driver targets non-ELS EX3300 syntax
-(including `link-mode full-duplex/half-duplex` rather than blindly copying an
-unverified `duplex` CLI keyword); remote preview/commit-check validates actual
-support. Interface units with unrepresented settings remain Advanced rather
-than silently flattening or deleting those settings. Configuration secrets remain
-encrypted at rest, and saved login credentials replace Switchman's device-password
-fields.
 
 ### Credentials and SSH trust
 
@@ -543,7 +350,7 @@ trusted management network. SNMP failure does not discard valid SSH telemetry.
 An active superuser has access to every switch. Other users see only explicitly
 granted devices. Global `manage_inventory` and `discover_switches` permissions
 control onboarding/discovery. Grant administration privileges only to trusted
-people; Django's user/group administration can itself confer privileged access.
+people; superusers can confer privileged access through Users.
 WebSocket access is checked again against the database/session on every event,
 so revoked device access, account disabling and logout take effect.
 
@@ -560,8 +367,8 @@ cross-switch atomic commit or automatic rollback of a fleet.
 
 Discovery accepts any IPv4 or IPv6 network with at most 256 addresses per run.
 There is no network allowlist. Grant the **Scan networks and discover switches**
-permission (`switches.discover_switches`) to authorized users or groups in Django
-administration; a per-switch role alone does not permit scanning. Existing grants
+permission (`switches.discover_switches`) to authorized users through Users
+or existing group membership; a per-switch role alone does not permit scanning. Existing grants
 of this permission are retained, and superusers have it automatically. The web
 page, queue service and worker enforce scanning permission, and the worker
 rechecks it before network contact. Only grant it to people authorized to scan
@@ -671,6 +478,18 @@ demonstrate framing, host-key rejection, input validation and candidate cleanup.
 ## Settings and deployment
 
 `SWITCH_POLL_SECONDS` controls Beat polling (default 60, minimum 30).
+Separate lightweight TCP checks run every **120 seconds** for every active
+switch, even with automatic synchronization disabled or a configuration job
+running. They use the configured management address/port with a three-second
+connection timeout, never log in, and do not acquire the configuration lock or
+create job-history entries. Fleet and device views show reachability and the
+last-check timestamp through WebSockets; checks older than five minutes show
+**Check overdue**, not a misleading current Online/Offline status. Full sync
+status remains separate: an open port does not prove successful authentication.
+
+Channels Redis connections explicitly use a 15-second socket timeout (longer
+than their five-second blocking receive), avoiding idle WebSocket disconnects
+with Redis clients whose default socket timeout is five seconds.
 `DATABASE_PATH` overrides the SQLite database location. SQLite is suitable for a
 small initial installation; fleet-scale deployments should configure Django
 `DATABASES` for PostgreSQL, install its database adapter, and size workers and
@@ -707,3 +526,31 @@ The test settings generate ephemeral keys, use an in-memory channel layer and do
 not contact real switches. Tests cover backend authorization, encrypted storage,
 discovery boundaries, conflict detection, idempotent jobs, NETCONF transactions,
 HTTP authorization/CSRF and WebSocket session/access revocation.
+# External configuration changes
+
+Synchronization detects configuration that differs from the approved baseline,
+including changes made directly in the device GUI or CLI. Detection happens on
+the next successful automatic or manual sync, not at the instant of the edit.
+Persistent notifications appear in the fleet overview and individual workspace
+and update through permission-filtered WebSockets. The first captured
+configuration (or the latest existing revision when upgrading) is the initial
+approved baseline.
+
+Operators can review the diff and **Accept** the observed revision locally
+without writing to the switch, or **Reverse** only the detected settings.
+Reversal reads fresh configuration, checks affected settings for conflicts,
+preserves unrelated edits, and uses the driver's existing concurrency checks.
+App configuration writes are blocked until detected external changes are
+resolved; accepting a revision does not rebase older staged changes.
+
+Detection covers the configuration exposed by each profile. NETGEAR snapshots
+are managed-field snapshots, not complete backups; edits outside the adapter's
+read support cannot be detected.
+
+Junos uses a locked, checked XML merge. Ambiguous hierarchies and ordered
+firewall-policy edits fail closed. NETGEAR and Comware reversal is limited to
+fields supported by their graphical editors; unsupported changes and item
+creation/deletion require the native interface. These adapters write
+sequentially and non-atomically; uncertain reversals must not be retried.
+Startup persistence is not verified. Uncertain app commits retain their
+existing Verify outcome workflow instead of being classified as external edits.

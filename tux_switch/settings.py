@@ -153,6 +153,10 @@ CELERY_RESULT_SERIALIZER = "json"
 CELERY_TASK_IGNORE_RESULT = True
 CELERY_TASK_TIME_LIMIT = 600
 CELERY_BEAT_SCHEDULE = {
+    "check-switch-reachability": {
+        "task": "switches.tasks.check_switches_online",
+        "schedule": 120,
+    },
     "poll-switches": {
         "task": "switches.tasks.poll_switches",
         "schedule": max(30, int(os.environ.get("SWITCH_POLL_SECONDS", "60"))),
@@ -161,7 +165,8 @@ CELERY_BEAT_SCHEDULE = {
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
-        "CONFIG": {"hosts": [REDIS_URL]},
+        # Must exceed Channels' five-second blocking receive, including latency.
+        "CONFIG": {"hosts": [{"address": REDIS_URL, "socket_timeout": 15, "socket_connect_timeout": 5}]},
     },
 }
 CONFIG_ENCRYPTION_KEY = os.environ.get("CONFIG_ENCRYPTION_KEY", "")

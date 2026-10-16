@@ -1,0 +1,8 @@
+<table><thead><tr><th>Account</th><th>Name</th><th>Email</th><th>Status</th><th>Groups</th><th>Direct permissions</th><th>Actions</th></tr></thead>
+<tbody>{% for account in accounts %}
+<tr><td>{{ account.username }}</td><td>{{ account.get_full_name|default:"-" }}</td><td>{{ account.email|default:"-" }}</td><td>{{ account.is_active|yesno:"Active,Inactive" }}{% if account.is_superuser %} · Superuser{% endif %}</td>
+<td>{% for group in account.groups.all %}{{ group.name }}{% if not forloop.last %}, {% endif %}{% empty %}-{% endfor %}</td>
+<td>{% for permission in account.user_permissions.all %}{{ permission.name }}{% if not forloop.last %}, {% endif %}{% empty %}-{% endfor %}</td>
+<td class="actions"><a class="icon-button" href="{% url 'user-edit' account.pk %}" title="Edit account" aria-label="Edit account {{ account.username }}">{% include 'switches/action_icon.html' with icon='edit' %}</a><a href="{% url 'user-password' account.pk %}">Set password</a></td></tr>
+{% endfor %}</tbody></table>
+<p class="muted">Group permissions are inherited. Superusers have all application and device permissions.</p>

@@ -1,8 +1,13 @@
 from django.urls import path
 
-from . import views
+from . import user_management, views
 
 urlpatterns = [
+    path("users/", user_management.users, name="users"),
+    path("users/add/", user_management.account_editor, name="user-add"),
+    path("users/<int:pk>/edit/", user_management.account_editor, name="user-edit"),
+    path("users/<int:pk>/password/", user_management.account_editor, {"password": True}, name="user-password"),
+    path("access/", user_management.access_management, name="access-management"),
     path("", views.dashboard, name="dashboard"),
     path("switches/add/", views.inventory, name="switch-add"),
     path("discovery/", views.discovery, name="discovery"),
@@ -21,6 +26,7 @@ urlpatterns = [
     path("switches/<int:pk>/changes/<int:change_id>/", views.change_action, name="change-action"),
     path("switches/<int:pk>/changes/<int:change_id>/edit/", views.edit_staged_change, name="change-edit"),
     path("switches/<int:pk>/pending/", views.pending_action, name="pending-action"),
+    path("switches/<int:pk>/external/<int:change_id>/", views.external_action, name="external-action"),
     path("switches/<int:pk>/revisions/<int:revision_id>/", views.revision, name="revision-detail"),
     path("switches/<int:pk>/revisions/<int:revision_id>/restore/", views.restore, name="revision-restore"),
     path("switches/<int:pk>/jobs/<int:job_id>/", views.job, name="job-detail"),

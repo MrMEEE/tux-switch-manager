@@ -6,15 +6,16 @@
 <section id="configuration" class="panel" data-configuration-current>
   <p class="eyebrow">CONFIGURE YOUR SWITCH</p>
   <h2>Current configuration</h2>
-  <p class="muted">Items marked Staged show locally planned values, not applied device settings. Review and commit to apply them, or discard to show synchronized values again.</p>
+  <p class="muted">Staged means saved here but not yet applied to the switch. Items marked Staged show your pending settings. Commit applies them to the switch; discarding a staged change removes it here without changing the switch.</p>
   {% for warning in staged_configuration_warnings %}<p class="notice error" role="alert">{{ warning }}</p>{% endfor %}
-  {% if managed_driver %}<p class="notice">{{ web_configuration_warning|default:"Web adapter: managed-field baseline only, not a full backup. HTTP is unencrypted; writes are not atomic. Only supported settings are shown." }}</p>{% else %}<p class="muted">Select an existing item to edit its current settings, or add a new item. Changes are staged for Review and Commit. Unsupported settings remain intact and are available through Advanced.</p>{% endif %}
+  {% if managed_driver %}<p class="notice">{{ web_configuration_warning|default:"Web adapter: synchronized supported settings only, not a full backup. HTTP is unencrypted; writes are not atomic. Only supported settings are shown." }}</p>{% else %}<p class="muted">Select an existing item to edit its settings, or add a new item. Saving creates a staged change in Review and Commit; it does not change the switch. Unsupported settings remain intact and are available through Advanced.</p>{% endif %}
   {% if configuration_error %}<div class="notice error" role="alert">{{ configuration_error }}</div>
   {% else %}
-  <p class="muted">Synchronized baseline: revision #{{ configuration_revision.pk }} · {{ configuration_revision.created_at }}</p>
+  <p class="muted">Latest synchronized configuration: revision #{{ configuration_revision.pk }} · {{ configuration_revision.created_at }}</p>
   {% for section in configuration_sections %}
   <section class="configuration-section" id="configure-{{ section.slug }}" role="tabpanel" aria-labelledby="tab-{{ section.slug }}" data-configuration-panel>
     <h3>{{ section.label }} <span class="badge">{{ section.rows|length }}</span></h3>
+    {% if section.slug == 'ports' %}<p class="muted">Link status is observed operational state, not the staged admin setting. {% if switch.last_synced %}Last collected: {{ switch.last_synced }}.{% endif %} Unknown means link telemetry is unavailable or unrecognized. Updates arrive after synchronization.</p>{% endif %}
     {% if section.can_add %}
     <div class="form-actions">
       {% if section.slug == 'services' %}
@@ -25,6 +26,7 @@
     </div>
     {% endif %}
     <div class="table-scroll"><table><thead><tr><th>Item</th>
+      {% if section.slug == 'ports' %}<th>Link status</th>{% endif %}
       {% if managed_driver %}<th>Current settings</th>
       {% elif section.slug == 'ports' or section.slug == 'lags' %}<th>Description</th><th>Admin state</th><th>Mode</th><th>VLANs</th>{% if section.slug == 'lags' %}<th>Members</th><th>LACP</th>{% else %}<th>LAG</th>{% endif %}
       {% elif section.slug == 'vlans' %}<th>VLAN ID</th>
@@ -33,6 +35,7 @@
       {% else %}<th>Current settings</th>{% endif %}
       <th>Edit</th></tr></thead><tbody>
       {% for row in section.rows %}<tr><td class="mono">{{ row.key }}{% if row.staged %} <span class="badge" title="Locally staged; not applied to the switch"><span aria-hidden="true">&#9998;</span> Staged{% if row.staged_deleted %} — deletion{% endif %}</span>{% endif %}</td>
+        {% if section.slug == 'ports' %}<td><span class="badge {% if row.link_state == 'up' %}badge-ok{% elif row.link_state == 'down' %}badge-warn{% endif %}" title="Observed link state from the latest synchronized interface telemetry">{{ row.link_state|capfirst }}</span></td>{% endif %}
         {% if managed_driver %}<td>{{ row.summary }}{% if row.description %}<br>{{ row.description }}{% endif %}</td>
         {% elif section.slug == 'ports' or section.slug == 'lags' %}<td>{{ row.description|default:"—" }}{% if row.mtu %}<br>MTU {{ row.mtu }}{% endif %}{% if row.speed %}<br>Speed {{ row.speed }}{% endif %}{% if row.duplex %}<br>{{ row.duplex }}{% endif %}</td><td>{{ row.admin_state }}</td><td>{{ row.mode|default:"Not configured" }}{% if row.addresses %}<br>Routed: {{ row.addresses|join:", " }}{% endif %}</td><td>{{ row.vlans|join:", "|default:"None" }}{% if row.native_vlan %}<br>Native ID {{ row.native_vlan }}{% endif %}</td>{% if section.slug == 'lags' %}<td>{{ row.members|join:", "|default:"None" }}</td><td>{{ row.lacp|default:"Disabled" }}{% if row.minimum_links %}<br>Minimum links {{ row.minimum_links }}{% endif %}</td>{% else %}<td>{{ row.lag|default:"None" }}</td>{% endif %}
         {% elif section.slug == 'vlans' %}<td>{% if row.implicit_default %}1 (implicit default){% else %}{{ row.vlan_id|default:row.vlan_id_list }}{% endif %}{% if row.description %}<br>{{ row.description }}{% endif %}{% if row.aging_time %}<br>MAC aging: {{ row.aging_time }} seconds{% endif %}{% if row.filter_in %}<br>Input filter: {{ row.filter_in }}{% endif %}{% if row.filter_out %}<br>Output filter: {{ row.filter_out }}{% endif %}{% if row.l3_interface %}<br>Routed interface: {{ row.l3_interface }} {{ row.l3_addresses|join:", " }}{% endif %}</td>

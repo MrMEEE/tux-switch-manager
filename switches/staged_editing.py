@@ -28,11 +28,75 @@ def editor_data(form):
     }
 
 
+def item_keys(data):
+    values, section = data["values"], data["section"]
+    keys = {data["key"]} if data.get("key") is not None else set()
+    if section in {"ports", "lags", "vlans"}:
+        keys.update(value for value in (values.get("name"), values.get("new_name")) if value)
+    elif section == "routing" and values.get("prefix"):
+        keys.add(values["prefix"])
+    elif section == "firewall" and values.get("term"):
+        filter_name = values.get("new_filter") if values.get("filter") == "__new__" else values.get("filter")
+        if filter_name:
+            keys.add(f"{filter_name}/{values['term']}")
+    elif section == "services":
+        kind = values.get("kind", data.get("kind"))
+        if kind in {"ntp", "dns"} and values.get("server"):
+            keys.add(f"{kind}:{values['server']}")
+        elif kind == "snmp":
+            keys.add("snmp-metadata")
+        elif kind == "snmp-community" and values.get("community_env"):
+            keys.add(f"community-reference:{values['community_env']}")
+    elif section == "system":
+        keys.add("system")
+    elif section == "aggregation":
+        keys.add("device-count")
+    return keys
+
+
+def item_changes(switch, revision, state, section, keys):
+    """Match editor ownership, not incidental effects on other configuration rows."""
+    matches = []
+    for change in switch.changes.exclude(status__in=["discarded", "committed"]).order_by("pk"):
+        data = change.editor_data
+        if not data:
+            if change.status != "pending" or change.base_revision_id != revision.pk:
+                continue
+            try:
+                data = details(switch, change, revision, state)
+            except DriverError:
+                # Multi-object manual changes cannot safely identify one editor owner.
+                continue
+        if data["section"] == section and item_keys(data) & keys:
+            matches.append(change)
+    return matches
+
+
+def existing_item_change(switch, revision, state, section, key):
+    keys = {key} if key is not None else item_keys({"section": section, "key": None, "values": {}})
+    if not keys:
+        return None
+    matches = item_changes(switch, revision, state, section, keys)
+    if len(matches) > 1:
+        raise DriverError(
+            "This item already has several staged changes. Review their intended settings in Review and Commit, "
+            "discard the duplicate pending changes, then save one combined change. No changes were merged automatically."
+        )
+    return matches[0] if matches else None
+
+
 def details(switch, change, revision, state):
     if change.status != "pending":
         raise DriverError("Only pending staged changes can be edited. Running or uncertain changes cannot be changed.")
     if change.base_revision_id != revision.pk:
-        raise DriverError("This staged change has an outdated baseline. Remove/revert it and restage against the current configuration.")
+        raise DriverError(
+            "This pending change was saved using an older configuration revision. "
+            "Review its generated commands and note the settings you want to keep. "
+            "Use Remove staged item or Revert staged change below to discard this pending change "
+            "without changing the switch. Then edit the item in Current configuration "
+            "(or add it again), enter only the settings still needed, and save a new staged change. "
+            "Review the new change before committing it."
+        )
     if change.editor_data:
         return change.editor_data
     # Older staged changes have no saved form metadata. Recover only a single
@@ -47,12 +111,12 @@ def details(switch, change, revision, state):
         if all(path[:1] == ["vlans"] for path in paths):
             names = {path[1] for path in paths}
             if len(names) != 1:
-                raise DriverError("This older change includes several items. Remove it and restage through the GUI to edit it.")
+                raise DriverError("This saved change includes several items and cannot be opened in one editor. Note the intended settings, discard the pending change, then edit each item in Current configuration and save new staged changes.")
             section, key = "vlans", names.pop()
         elif all(path[:1] == ["interfaces"] for path in paths):
             names = {path[1] for path in paths}
             if len(names) != 1:
-                raise DriverError("This older change includes several items. Remove it and restage through the GUI to edit it.")
+                raise DriverError("This saved change includes several items and cannot be opened in one editor. Note the intended settings, discard the pending change, then edit each item in Current configuration and save new staged changes.")
             key = names.pop()
             section = "lags" if key.startswith("ae") else "ports"
         else:
@@ -62,13 +126,13 @@ def details(switch, change, revision, state):
                 after = {row["key"]: row for row in target.get(section, [])}
                 changed.extend((section, key) for key in before.keys() | after.keys() if before.get(key) != after.get(key))
             if len(changed) != 1:
-                raise DriverError("This older change cannot be recovered as one GUI item. Remove it and restage through the GUI.")
+                raise DriverError("This saved change cannot be opened in one editor. Note the intended settings, discard the pending change, then use Current configuration to save new staged changes.")
             section, key = changed[0]
     original = next((row for row in state[section] if row["key"] == key), None)
     planned = next((row for row in target[section] if row["key"] == key), None)
     row = planned or original
     if row is None:
-        raise DriverError("The staged item could not be recovered. Remove it and restage.")
+        raise DriverError("This saved change cannot be opened in the editor. Note the intended settings, discard the pending change, then use Current configuration to save a new staged change.")
     values = {name: value for name, value in row.items() if not name.startswith("_")}
     values["operation"] = "save" if planned else "delete"
     if section == "routing":
@@ -104,10 +168,18 @@ def save_change(device, revision, form, commands, user):
     from django.db import transaction
     data = editor_data(form)
     editing = getattr(form, "editing_change", None)
+    from .configuration import current_state
+    _, state = current_state(device)
+    matches = item_changes(device, revision, state, data["section"], item_keys(data))
+    if any(change.pk != getattr(editing, "pk", None) for change in matches):
+        raise DriverError(
+            "This item already has a staged change. Reopen its editor to include the saved pending settings "
+            "and update that change instead of creating another. Your draft was not saved."
+        )
     if editing:
         current = ConfigChange.objects.select_for_update().get(pk=editing.pk, switch=device)
         if current.status != "pending" or current.base_revision.pk != revision.pk:
-            raise DriverError("This staged change is no longer pending on the current baseline. Reopen the editor.")
+            raise DriverError("This change is no longer pending or uses an older configuration revision. Return to Review and Commit to check its status and follow the recovery steps.")
         if fingerprint(current) != form.cleaned_data["staged_token"]:
             raise DriverError("This staged change was edited in another session. Reload before saving.")
         ConfigChange.objects.filter(pk=current.pk).update(commands=commands, editor_data=data)

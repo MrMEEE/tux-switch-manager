@@ -135,6 +135,8 @@ class SwitchForm(forms.ModelForm):
         device = super().save(commit=False)
         if self.original_identity != (device.address, device.port, device.driver):
             device.https_pending = {}
+            device.reachable = None
+            device.last_checked = None
             # Keep HTTPS verification strict when changing endpoints; do not
             # silently downgrade a previously HTTPS-managed device.
             device.tls_fingerprint = ""

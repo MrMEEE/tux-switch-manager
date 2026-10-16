@@ -575,6 +575,23 @@ class DriverTests(unittest.TestCase):
         self.assertIn("check", self.channel.calls)
         self.assertIn("commit", self.channel.calls)
 
+    def test_external_reversal_xml_merge_uses_locked_checked_transaction(self):
+        delta = ET.fromstring('<configuration><system><host-name operation="replace">old</host-name></system></configuration>')
+        self.driver.apply_patch_xml(delta, self.channel.committed_config)
+        load = next(op for op in self.channel.operations if op.tag == "load-configuration")
+        self.assertEqual(load.attrib, {"action": "merge", "format": "xml"})
+        self.assertEqual(load.findtext("configuration/system/host-name"), "old")
+        self.assertEqual(load.find("configuration/system/host-name").get("operation"), "replace")
+        self.assertEqual(self.channel.calls, [
+            "lock-configuration", "compare", "get-config", "load", "compare",
+            "check", "commit", "unlock-configuration",
+        ])
+
+    def test_external_reversal_stale_baseline_never_loads_xml(self):
+        with self.assertRaises(ConfigConflict):
+            self.driver.apply_patch_xml(ET.fromstring("<configuration/>"), "stale")
+        self.assertNotIn("load", self.channel.calls)
+
     def test_restore_conflict_and_invalid_text(self):
         with self.assertRaises(DriverError):
             self.driver.restore("", self.channel.committed_config)

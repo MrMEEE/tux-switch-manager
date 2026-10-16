@@ -101,6 +101,32 @@ class ConfigurationEditorTests(TestCase):
         self.assertContains(response, "Review and Commit")
         self.assertContains(response, "Advanced settings")
 
+    def test_lag_member_choices_show_interface_descriptions_when_creating_and_editing(self):
+        for key in (None, "ae0"):
+            with self.subTest(key=key):
+                response = self.client.get(self.editor_url("lags", key))
+                form = response.context["form"]
+                choices = dict(form.fields["members"].choices)
+                self.assertEqual(choices["ge-0/0/0"], "ge-0/0/0 - User access")
+                self.assertEqual(choices["ge-0/0/1"], "ge-0/0/1 - Router uplink")
+                self.assertEqual(choices["ge-0/0/4"], "ge-0/0/4")
+                self.assertNotIn("ge-0/0/3", choices)
+                self.assertContains(response, "ge-0/0/0 - User access")
+                if key:
+                    self.assertEqual(choices["ge-0/0/2"], "ge-0/0/2")
+                    self.assertEqual(form["members"].value(), ["ge-0/0/2"])
+                else:
+                    self.assertNotIn("ge-0/0/2", choices)
+
+    def test_lag_member_description_is_escaped_without_changing_interface_values(self):
+        self.switch.snapshot["config_xml"] = CONFIG_XML.replace(
+            "User access", "&lt;script&gt; &amp; Uplink")
+        self.switch.save()
+        response = self.client.get(self.editor_url("lags"))
+        self.assertContains(response, "ge-0/0/0 - &lt;script&gt; &amp; Uplink")
+        self.assertNotContains(response, "<script> & Uplink")
+        self.assertContains(response, 'value="ge-0/0/0"')
+
     def test_configuration_tabs_are_outside_the_panel_and_target_single_sections(self):
         response = self.client.get(reverse("switch-detail", args=[self.switch.pk]))
         html = response.content.decode()
@@ -318,7 +344,7 @@ class ConfigurationEditorTests(TestCase):
             "admin_state": "up", "mode": "access", "vlans": ["users"],
         })
         self.assertEqual(response.status_code, 302)
-        self.assertIn("#configuration-review", response.url)
+        self.assertEqual(response.url, f"{reverse('switch-detail', args=[self.switch.pk])}#configure-ports")
         change = ConfigChange.objects.get()
         self.assertEqual(change.base_revision_id, self.revision.pk)
         self.assertIn('description "Edited"', change.commands)

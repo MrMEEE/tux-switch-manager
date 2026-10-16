@@ -16,6 +16,22 @@ def snapshot(request, topic, pk=None):
     if topic == "fleet":
         template = "switches/fleet_data.html"
         context = {"switches": visible_switches(user).defer("snapshot", "credential_env", "username")}
+    elif topic in {"users", "access", "access-form", "user-form"}:
+        from django.contrib.auth import get_user_model
+        from .user_management import access_context, editor_context, user_list_context
+        if topic == "users":
+            template, context = "switches/user_data.html", user_list_context(user)
+        elif topic in {"access", "access-form"}:
+            template = "switches/access_data.html" if topic == "access" else "switches/form_fields.html"
+            context = access_context(user)
+        else:
+            target = get_user_model().objects.filter(pk=pk).first() if pk else None
+            if pk and target is None:
+                raise PermissionDenied
+            if request.GET.get("kind") == "password" and target is None:
+                raise PermissionDenied
+            template = "switches/user_form.html"
+            context = editor_context(user, target, request.GET.get("kind", "edit"), request.GET.get("token"))
     elif topic in {"navigation", "account", "fleet-controls"}:
         template = f"switches/{topic.replace('-', '_')}.html"
         context = {}
@@ -73,6 +89,17 @@ def snapshot(request, topic, pk=None):
             if change_id:
                 change = ConfigChange.objects.filter(pk=change_id, switch=switch).first() if change_id.isascii() and change_id.isdigit() else None
                 stale = stale or change is None or change.status != "pending" or fingerprint(change) != request.GET.get("token")
+            elif not stale and request.GET.get("section"):
+                from .configuration import current_state
+                from .drivers.base import DriverError
+                from .staged_editing import existing_item_change
+                try:
+                    revision, state = current_state(switch)
+                    stale = existing_item_change(
+                        switch, revision, state, request.GET["section"], request.GET.get("item"),
+                    ) is not None
+                except DriverError:
+                    stale = True
             template = "switches/editor_state.html"
             context = {"switch": switch, "latest_revision": latest, "editor_stale": stale}
         else:
@@ -98,6 +125,8 @@ def snapshot(request, topic, pk=None):
     else:
         raise PermissionDenied
     payload = {"event": "snapshot", "html": render_to_string(template, context, request=request)}
+    if topic == "user-form":
+        payload["metadata"] = {"editor_stale": context["editor_stale"]}
     if topic in {"switch", "switch-heading", "editor-state", "revision", "job"}:
         device = context["job"].switch if topic == "job" else context["switch"]
         payload["metadata"] = {

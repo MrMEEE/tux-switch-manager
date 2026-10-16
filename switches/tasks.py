@@ -1,5 +1,6 @@
 from datetime import timedelta
 import logging
+import socket
 from types import SimpleNamespace
 import uuid
 
@@ -16,6 +17,29 @@ from .profiles import annotate, resolve
 from .services import ACTION_ROLES, action_role, notify_live, notify_switch, publish_job, record_revision, validate_network
 
 logger = logging.getLogger(__name__)
+
+
+@shared_task
+def check_switches_online():
+    for switch_id in Switch.objects.filter(active=True).values_list("pk", flat=True):
+        check_switch_online.apply_async(args=[switch_id], expires=120)
+
+
+@shared_task(time_limit=15)
+def check_switch_online(switch_id):
+    device = Switch.objects.filter(pk=switch_id, active=True).values("address", "port").first()
+    if device is None:
+        return
+    try:
+        with socket.create_connection((device["address"], device["port"]), timeout=3):
+            reachable = True
+    except OSError:
+        reachable = False
+    updated = Switch.objects.filter(pk=switch_id, active=True, **device).update(
+        reachable=reachable, last_checked=timezone.now(),
+    )
+    if updated:
+        notify_switch(switch_id)
 
 
 def get_driver(device):
@@ -49,7 +73,9 @@ def synchronize(switch, driver, source="poll", user=None):
             snapshot["snmp_error"] = "SNMP polling failed; SSH telemetry remains available."
     driver.report_progress("Saving synchronized configuration and telemetry.")
     with transaction.atomic():
-        record_revision(switch, config, source, user)
+        record_revision(switch, config, source, user, structured_config=(
+            snapshot.get("config_xml", "") if snapshot.get("config") == config else ""
+        ))
         Switch.objects.filter(pk=switch.pk).update(
             snapshot=snapshot, model=facts.get("model", switch.model), status="online",
             last_synced=timezone.now(), last_error="",
@@ -102,6 +128,9 @@ def execute_job(job_id):
             elif job.action == "verify":
                 from .verification import verify_outcome
                 output = verify_outcome(switch, driver, job)
+            elif job.action == "reverse_external":
+                from .drift import reverse_outcome
+                output = reverse_outcome(switch, driver, job)
             elif job.action == "monitor":
                 output = driver.monitor(job.payload["section"])
             elif job.action == "command":
@@ -129,20 +158,24 @@ def execute_job(job_id):
                     output = driver.preview(commands)
                     ConfigChange.objects.filter(pk__in=ids).update(status="pending")
                 else:
+                    if switch.external_change:
+                        raise DriverError("External configuration changes require review before applying staged changes.")
                     job_progress(job.pk, "Validating and applying configuration. Waiting for device acknowledgement; do not retry.")
                     output = driver.apply(commands, expected_config=change.base_revision.config)
                     job_progress(job.pk, "The switch acknowledged the configuration write. Reading back committed configuration.")
                     ConfigChange.objects.filter(pk__in=ids).update(status="committed")
                     # Persist the new revision even if subsequent telemetry collection fails.
                     record_revision(switch, driver.get_config(), "commit", job.created_by)
-                    synchronize(switch, driver, "commit", job.created_by)
+                    synchronize(switch, driver, "poll", job.created_by)
             elif job.action == "restore":
+                if switch.external_change:
+                    raise DriverError("External configuration changes require review before restoring.")
                 revision = ConfigRevision.objects.get(pk=job.payload["revision_id"], switch=switch)
                 baseline = ConfigRevision.objects.get(pk=job.payload["base_id"], switch=switch)
                 job_progress(job.pk, "Restoring configuration and waiting for device acknowledgement; do not retry.")
                 output = driver.restore(revision.config, expected_config=baseline.config)
                 record_revision(switch, driver.get_config(), "restore", job.created_by)
-                synchronize(switch, driver, "restore", job.created_by)
+                synchronize(switch, driver, "poll", job.created_by)
         job.status = "success"
         job.output = output
     except Exception as error:
@@ -158,10 +191,13 @@ def execute_job(job_id):
             ConfigChange.objects.filter(
                 pk__in=job.payload.get("change_ids", [job.payload.get("change_id")]), switch=switch, status=f"{job.action}ing"
             ).update(status="uncertain" if isinstance(error, PartialApply) else "pending")
+        if job.action == "reverse_external":
+            from .models import ExternalChange
+            ExternalChange.objects.filter(pk=job.payload.get("external_id"), status="reversing").update(status="pending")
         logger.warning("Switch job %s failed (%s).", job.pk, type(error).__name__)
     finally:
         diagnostics = getattr(driver, "transaction_diagnostics", None)
-        if job.action in {"preview", "apply", "restore"} and isinstance(diagnostics, list) and diagnostics:
+        if job.action in {"preview", "apply", "restore", "reverse_external"} and isinstance(diagnostics, list) and diagnostics:
             job.output += "\n\nNETCONF transaction diagnostics (configuration values omitted):\n" + "\n".join(diagnostics)
         job.completed_at = timezone.now()
         job.save(update_fields=["status", "output", "completed_at"])
@@ -186,6 +222,9 @@ def poll_switches():
                 pk__in=expired.payload.get("change_ids", [expired.payload.get("change_id")]), switch_id=expired.switch_id,
                 status=f"{expired.action}ing",
             ).update(status="uncertain" if expired.action == "apply" else "pending")
+        if expired.action == "reverse_external":
+            from .models import ExternalChange
+            ExternalChange.objects.filter(pk=expired.payload.get("external_id"), status="reversing").update(status="uncertain")
         notify_switch(expired.switch_id)
     for switch in Switch.objects.filter(active=True, monitoring_enabled=True).defer("snapshot"):
         with transaction.atomic():

@@ -1,0 +1,23 @@
+{% if external_change %}
+<section class="panel" aria-label="External configuration change">
+  <h2>External configuration change <span class="badge">{{ external_change.status }}</span></h2>
+  <p class="notice" role="alert">Configuration differs from the last approved configuration revision. Detected {{ external_change.detected_at }}. Review before making further configuration writes.</p>
+  {% if operator %}
+  <p>Approved revision #{{ external_change.baseline_id }} · Observed revision #{{ external_change.observed_id }}</p>
+  <details data-live-key="external-diff-{{ external_change.pk }}"><summary>Review detected differences</summary><pre>{{ external_diff }}</pre></details>
+  <p>Accept approves the observed configuration locally, without writing to the switch. Reverse changes only the detected settings and refuses affected settings that changed again. Adapter limits apply: unsupported or ordered policy changes require manual reconciliation. NETGEAR/Comware writes are non-atomic; startup persistence is not verified.</p>
+  {% if external_change.status == 'uncertain' %}<p class="notice" role="alert">A reversal may have partially succeeded. Synchronize and inspect the switch before accepting its current state. Do not retry the reversal.</p>{% endif %}
+  {% if external_change.status != 'reversing' %}
+  <form data-live-submit method="post" action="{% url 'external-action' switch.pk external_change.pk %}" data-confirm="Accept this observed configuration as the approved configuration revision? This does not write to the switch. Sync now first if you suspect more edits.">
+    {% csrf_token %}<input type="hidden" name="confirm" value="yes"><button name="action" value="accept" title="Accept observed configuration" aria-label="Accept observed configuration">{% include 'switches/action_icon.html' with icon='commit' %}</button>
+  </form>
+  {% endif %}
+  {% if external_reverse_error %}<p class="notice" role="status">{{ external_reverse_error }}</p>{% endif %}
+  {% if external_change.status == 'pending' and not external_reverse_error %}
+  <form data-live-submit method="post" action="{% url 'external-action' switch.pk external_change.pk %}" data-confirm="Reverse the detected external settings on the switch? New conflicts will block reversal. Non-atomic adapters can partially apply changes; review job output and do not retry an uncertain outcome.">
+    {% csrf_token %}<input type="hidden" name="confirm" value="yes"><button class="danger" name="action" value="reverse" title="Reverse detected changes" aria-label="Reverse detected changes">{% include 'switches/action_icon.html' with icon='revert' %}</button>
+  </form>
+  {% endif %}
+  {% else %}<p>An operator can review and accept or reverse these settings.</p>{% endif %}
+</section>
+{% endif %}

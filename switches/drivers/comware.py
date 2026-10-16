@@ -455,7 +455,7 @@ class ComwareDriver(BaseDriver):
         op = operation(commands)
         before = self.get_config()
         if before != expected_config:
-            raise ConfigConflict("Comware configuration changed. Synchronize and restage.")
+            raise ConfigConflict("Comware configuration changed since this pending change was saved. Sync now, review and discard the old pending change, then use Current configuration to save a new staged change containing only the settings still needed.")
         cli, target = plan(before, op)
         try:
             for command in cli:
@@ -464,5 +464,5 @@ class ComwareDriver(BaseDriver):
                 raise DriverError("Comware full-configuration readback did not match the plan.")
         except Exception as error:
             logger.warning("Comware apply/readback failed (%s); outcome requires reconciliation.", type(error).__name__)
-            raise PartialApply("Comware write outcome is uncertain or partially applied. No rollback, save or retry was attempted. Synchronize and inspect the native CLI before restaging.") from None
+            raise PartialApply("Comware write outcome is uncertain or partially applied. No rollback, save or retry was attempted. Use Verify outcome or sync and inspect the switch CLI before creating any replacement changes. Do not commit this change again.") from None
         return "Comware full-configuration readback verified. Startup configuration was not saved.\n" + WARNING

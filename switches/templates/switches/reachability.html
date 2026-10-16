@@ -1,0 +1,5 @@
+<section class="panel" aria-label="Switch reachability">
+  <h2>Connectivity</h2>
+  <p><span class="badge">{{ switch.reachability_status }}</span> · Last checked: {{ switch.last_checked|date:"M j, H:i:s T"|default:"Never" }}</p>
+  <p class="muted">Active switches are checked every two minutes using their configured management port. This confirms TCP reachability, not authentication or configuration health. Full synchronization runs separately.</p>
+</section>

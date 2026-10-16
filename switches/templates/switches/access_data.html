@@ -1,0 +1,5 @@
+<h2>Current grants</h2>
+<table><thead><tr><th>User</th><th>Switch</th><th>Role</th></tr></thead><tbody>
+{% for grant in grants %}<tr><td>{{ grant.user.username }}{% if not grant.user.is_active %} (inactive){% endif %}</td><td>{{ grant.switch.name }} · {{ grant.switch.address }}</td><td>{{ grant.get_role_display }}</td></tr>
+{% empty %}<tr><td colspan="3">No explicit switch grants. Superusers always have access.</td></tr>{% endfor %}
+</tbody></table>

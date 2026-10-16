@@ -32,7 +32,8 @@ REDIS_URL="redis://127.0.0.1:6379/0"
 #DATABASE_PATH="/var/lib/tux-switch-manager/db.sqlite3"
 
 SWITCH_KNOWN_HOSTS="$HOME/.ssh/known_hosts"
-# Polling interval in seconds (minimum 30).
+# Full synchronization interval in seconds (minimum 30).
+# Lightweight management-port online checks run separately every 120 seconds.
 SWITCH_POLL_SECONDS=60
 # Optional fallback when service fingerprints cannot identify a vendor.
 # IEEE MA-L CSV, provided by the ieee-data package on Debian/Ubuntu.

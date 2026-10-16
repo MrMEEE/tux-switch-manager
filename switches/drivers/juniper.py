@@ -333,7 +333,7 @@ class JuniperEXDriver(BaseDriver):
             if committing:
                 raise PartialApply(
                     "Commit acknowledgement was lost. The switch may have committed the change. "
-                    "No retry was attempted; synchronize and reconcile actual configuration before restaging."
+                    "No retry was attempted. Use Verify outcome to check which settings are on the switch before creating any replacement changes."
                 ) from None
             raise
         except (OSError, socket.timeout, paramiko.SSHException):
@@ -342,14 +342,14 @@ class JuniperEXDriver(BaseDriver):
             if committing:
                 raise PartialApply(
                     "Commit acknowledgement was lost after a transport failure. The switch may have committed "
-                    "the change. No retry was attempted; synchronize and reconcile before restaging."
+                    "the change. No retry was attempted. Use Verify outcome before creating any replacement changes."
                 ) from None
             raise DriverError("NETCONF transport failed; refresh state before retrying.") from None
         if _local(reply.tag) != "rpc-reply" or reply.get("message-id") != message_id:
             self._trace(f"{label}: unexpected response; connection closed.")
             self.close()
             if committing:
-                raise PartialApply("Unexpected commit acknowledgement. Synchronize and reconcile before restaging.")
+                raise PartialApply("Unexpected commit acknowledgement. Use Verify outcome to check which settings are on the switch before creating any replacement changes.")
             raise DriverError("Unexpected NETCONF response.")
         rejected = []
         for error in reply.iter():
@@ -561,7 +561,7 @@ class JuniperEXDriver(BaseDriver):
                     if committed:
                         raise PartialApply(
                             "The switch acknowledged the commit, but candidate unlock failed. "
-                            "Synchronize and reconcile before restaging; do not apply again."
+                            "Use Verify outcome to check which settings are on the switch; do not commit this change again."
                         )
                     raise DriverError("Candidate cleanup failed; refresh state before retrying.")
 
@@ -624,4 +624,9 @@ class JuniperEXDriver(BaseDriver):
     def restore(self, config, expected_config):
         operation = _element("load-configuration", action="override", format="text")
         ET.SubElement(operation, "configuration-text").text = validation.config_text(config)
+        return self._transaction(operation, expected_config, commit=True)
+
+    def apply_patch_xml(self, patch, expected_config):
+        operation = _element("load-configuration", action="merge", format="xml")
+        operation.append(patch)
         return self._transaction(operation, expected_config, commit=True)

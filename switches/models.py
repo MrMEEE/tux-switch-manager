@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.core.validators import MinValueValidator, MaxValueValidator, RegexValidator
 from django.db import models
+from django.utils import timezone
 
 from .fields import EncryptedJSONField, EncryptedTextField
 
@@ -45,9 +46,28 @@ class Switch(models.Model):
     status = models.CharField(max_length=20, default="unknown")
     last_error = models.CharField(max_length=200, blank=True)
     last_synced = models.DateTimeField(null=True, blank=True)
+    reachable = models.BooleanField(null=True, blank=True)
+    last_checked = models.DateTimeField(null=True, blank=True)
     snapshot = EncryptedJSONField(default=dict, blank=True)
     operation_token = models.UUIDField(null=True, editable=False)
     locked_until = models.DateTimeField(null=True, editable=False)
+    approved_revision = models.ForeignKey(
+        "ConfigRevision", null=True, blank=True, on_delete=models.SET_NULL, related_name="+",
+    )
+
+    @property
+    def external_change(self):
+        return self.external_changes.filter(status__in=["pending", "reversing", "uncertain"]).first()
+
+    @property
+    def reachability_status(self):
+        if not self.active:
+            return "Inactive"
+        if self.last_checked is None or self.reachable is None:
+            return "Not checked"
+        if (timezone.now() - self.last_checked).total_seconds() > 300:
+            return "Check overdue"
+        return "Online" if self.reachable else "Offline"
 
     class Meta:
         ordering = ["name", "pk"]
@@ -90,10 +110,24 @@ class TrustedHostKey(models.Model):
 class ConfigRevision(models.Model):
     switch = models.ForeignKey(Switch, on_delete=models.CASCADE, related_name="revisions")
     config = EncryptedTextField()
+    structured_config = EncryptedTextField(blank=True, default="")
     checksum = models.CharField(max_length=64)
     source = models.CharField(max_length=20, default="poll")
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        ordering = ["-pk"]
+
+
+class ExternalChange(models.Model):
+    switch = models.ForeignKey(Switch, on_delete=models.CASCADE, related_name="external_changes")
+    baseline = models.ForeignKey(ConfigRevision, on_delete=models.RESTRICT, related_name="+")
+    observed = models.ForeignKey(ConfigRevision, on_delete=models.RESTRICT, related_name="+")
+    status = models.CharField(max_length=20, default="pending")
+    detected_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
 
     class Meta:
         ordering = ["-pk"]

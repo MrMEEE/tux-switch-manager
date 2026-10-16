@@ -1,0 +1,3 @@
+{% if editor_stale %}<p class="notice" role="alert">This account changed while you were editing. Your draft is preserved, but saving is blocked. Reopen the editor to review the current account.</p>{% endif %}
+{% if target %}<p>Account: {{ target.username }}</p>{% endif %}
+{% include 'switches/form_fields.html' %}

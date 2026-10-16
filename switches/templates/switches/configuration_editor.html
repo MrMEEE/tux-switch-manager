@@ -1,12 +1,12 @@
 {% extends 'switches/base.html' %}
 {% block content %}
-<a class="back" href="{% url 'switch-detail' switch.pk %}#configuration">Back to {{ switch.name }} configuration</a>
+<a class="back" href="{% url 'switch-detail' switch.pk %}#configure-{{ section }}">Back to {{ switch.name }} {{ label }}</a>
 <section class="panel form-panel">
   <p class="eyebrow">CURRENT CONFIGURATION EDITOR</p>
   <h1>{{ label }}{% if item %}: {{ item.key }}{% endif %}</h1>
-  {% if editing_change %}<p class="notice">Editing staged change #{{ editing_change.pk }}. Saving replaces this pending change, not the device configuration. Revert/remove it to discard the entire local change.</p>{% endif %}
-  <p class="muted">Prefilled from synchronized revision #{{ revision.pk }}. Saving stages only the fields you change. Nothing is applied until you review and commit.</p>
-  <div data-live-url="/ws/live/editor-state/{{ switch.pk }}/" data-editor-revision="{{ revision.pk }}" data-editor-profile="{{ switch.driver }}"{% if editing_change %} data-editor-change="{{ editing_change.pk }}" data-editor-token="{{ form.initial.staged_token }}"{% endif %}></div>
+  {% if editing_change %}<p class="notice">Editing staged change #{{ editing_change.pk }}. This form includes your saved pending settings. Saving combines your edits into this one staged change instead of creating another. Nothing is written to the switch. Revert/remove it to discard the entire pending change.</p>
+  {% else %}<p class="muted">Prefilled from synchronized revision #{{ revision.pk }}. Saving stages only the fields you change. Nothing is applied until you review and commit.</p>{% endif %}
+  <div data-live-url="/ws/live/editor-state/{{ switch.pk }}/" data-editor-revision="{{ revision.pk }}" data-editor-profile="{{ switch.driver }}" data-editor-section="{{ section }}"{% if item %} data-editor-item="{{ item.key }}"{% endif %}{% if editing_change %} data-editor-change="{{ editing_change.pk }}" data-editor-token="{{ form.initial.staged_token }}"{% endif %}></div>
   {% if web_driver %}<p class="notice">HTTP is unencrypted. Applying has no remote lock, atomic commit or rollback. Readback checks only managed fields, not startup persistence. Use Save Configuration in the device GUI after verifying the result. Management-port/VLAN edits can disconnect access.</p>{% endif %}
   {% if comware_driver %}<p class="notice">Experimental HP V1910 Comware 5 profile: live compatibility unverified. SSH2 only. CLI writes have no atomic commit, lock or rollback. Full configuration readback is checked; startup configuration is not saved. Port/VLAN edits can disconnect management access.</p>{% endif %}
   {% if item.implicit_default %}<p class="notice">This is Junos' implicit default VLAN. Leave VLAN ID blank to preserve it. Rename and deletion are unavailable here. Changing the routed management address or membership can disconnect the switch; changes remain staged until you commit.</p>{% endif %}
@@ -17,7 +17,7 @@
     {% csrf_token %}
     {% include 'switches/form_fields.html' %}
     {% if deletable %}<label class="checkbox-field"><input type="checkbox" name="confirm_delete">Confirm deletion if the Delete operation is selected.</label>{% endif %}
-    <div class="form-actions"><button>{% if editing_change %}Update staged change{% else %}Save to staged changes{% endif %}</button><a class="button quiet" href="{% url 'switch-detail' switch.pk %}#configuration">Cancel</a></div>
+    <div class="form-actions"><button>{% if editing_change %}Update staged change{% else %}Save to staged changes{% endif %}</button><a class="button quiet" href="{% url 'switch-detail' switch.pk %}#configure-{{ section }}">Cancel</a></div>
   </form>
 </section>
 {% endblock %}

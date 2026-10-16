@@ -16,7 +16,7 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 
 from . import services
 from .forms import BUILDERS, CONFIG_SECTION_CHOICES, ChangeForm, CredentialForm, DeleteForm, DiagnosticForm, DiscoveryForm, MonitorForm, SECTION_CHOICES, SwitchForm
-from .models import ConfigChange, ConfigRevision, Credential, DiscoveryRun, Job, Switch, SwitchAccess
+from .models import ConfigChange, ConfigRevision, Credential, DiscoveryRun, ExternalChange, Job, Switch, SwitchAccess
 from .permissions import can_access, visible_switches
 
 
@@ -71,6 +71,7 @@ def detail_context(request, switch):
         snapshot = {key: value for key, value in snapshot.items() if key in VIEWER_SNAPSHOT_KEYS} if isinstance(snapshot, dict) else {}
     context = {
         "switch": switch, "operator": operator,
+        "external_change": switch.external_change,
         "device_admin": can_access(request.user, switch, "admin"),
         "snapshot_text": json.dumps(snapshot, indent=2, ensure_ascii=False),
         "jobs": list(jobs[:30]) if operator else [job for job in jobs[:100] if viewer_job(job)][:30],
@@ -94,6 +95,21 @@ def detail_context(request, switch):
     }
     context["change_form"].fields.pop("immediate")
     context["pending_change_count"] = sum(change.status == "pending" for change in context["changes"])
+    if operator and context["external_change"]:
+        external = context["external_change"]
+        context["external_diff"] = "\n".join(difflib.unified_diff(
+            external.baseline.config.splitlines(), external.observed.config.splitlines(),
+            fromfile="Approved configuration", tofile="Observed configuration", lineterm="",
+        ))
+        if external.status == "pending":
+            from .drift import managed_plan, xml_patch
+            try:
+                if switch.driver == "juniper_ex":
+                    xml_patch(external.baseline.structured_config, external.observed.structured_config, external.observed.structured_config)
+                else:
+                    managed_plan(switch.driver, external.baseline.config, external.observed.config, external.observed.config)
+            except DriverError as error:
+                context["external_reverse_error"] = str(error)
     if operator:
         for change in context["changes"]:
             change.remove_label = "Remove staged item" if change.editor_data and change.editor_data.get("key") is None else "Revert staged change"
@@ -125,6 +141,10 @@ def detail_context(request, switch):
                         change.edit_error = str(error)
             from .staged_configuration import projected_state
             state, context["staged_configuration_warnings"] = projected_state(switch, revision, state)
+            from .interface_status import port_link_states
+            link_states = port_link_states(switch.driver, switch.snapshot)
+            for port in state["ports"]:
+                port["link_state"] = link_states.get(port["key"], "unknown")
             change_controls = {change.pk: change for change in context["changes"]}
             for rows in state.values():
                 if isinstance(rows, list):
@@ -168,10 +188,18 @@ def configuration_editor(request, pk, section):
     key = request.GET.get("item")
     editing = None
     editor_details = None
+    if not request.GET.get("change"):
+        try:
+            from .staged_editing import existing_item_change
+            editing = existing_item_change(switch, revision, state, section, key)
+        except DriverError as error:
+            messages.error(request, str(error))
+            return redirect(f"{reverse('switch-detail', args=[pk])}#configuration-review")
     if request.GET.get("change"):
         if not request.GET["change"].isascii() or not request.GET["change"].isdigit():
             raise Http404
         editing = get_object_or_404(ConfigChange, pk=request.GET["change"], switch=switch)
+    if editing:
         try:
             from .staged_editing import details
             editor_details = details(switch, editing, revision, state)
@@ -199,7 +227,10 @@ def configuration_editor(request, pk, section):
     except DriverError as error:
         messages.error(request, str(error))
         return redirect("switch-detail", pk=pk)
-    if request.method == "POST" and form.is_valid():
+    if request.method == "POST" and editing and not request.POST.get("staged_token"):
+        form.is_valid()
+        form.add_error(None, "This item already has a staged change. Reopen its editor to include the saved pending settings before saving. Your draft was not saved.")
+    elif request.method == "POST" and form.is_valid():
         try:
             if form.cleaned_data["revision"] != revision.pk:
                 raise DriverError("Configuration changed since this editor was opened. Reload before saving.")
@@ -207,7 +238,7 @@ def configuration_editor(request, pk, section):
                 raise DriverError("Confirm deletion before staging this change.")
             change = stage_editor(switch, form, request.user)
             messages.success(request, f"Change #{change.pk} {'updated' if editing else 'staged'}. Review and commit it when ready.")
-            return redirect(f"{reverse('switch-detail', args=[pk])}#configuration-review")
+            return redirect(f"{reverse('switch-detail', args=[pk])}#configure-{section}")
         except DriverError as error:
             form.add_error(None, str(error))
     return render(request, "switches/configuration_editor.html", {
@@ -315,6 +346,30 @@ def detail(request, pk):
     switch = device_for(request, pk)
     context = detail_context(request, switch)
     return render(request, "switches/detail.html", context)
+
+
+@login_required
+@require_POST
+@never_cache
+def external_action(request, pk, change_id):
+    from . import drift
+    from .drivers.base import DriverError
+    switch = device_for(request, pk, "operator")
+    get_object_or_404(ExternalChange, pk=change_id, switch=switch)
+    if request.POST.get("confirm") != "yes":
+        raise PermissionDenied
+    try:
+        if request.POST.get("action") == "accept":
+            drift.accept(switch, change_id, request.user)
+            messages.success(request, "Observed configuration accepted as the approved baseline. No device configuration was written.")
+        elif request.POST.get("action") == "reverse":
+            drift.queue_reverse(switch, change_id, request.user)
+            messages.success(request, "Conflict-checked reversal queued. See job output; do not submit again.")
+        else:
+            raise PermissionDenied
+    except (DriverError, ValueError) as error:
+        messages.error(request, str(error))
+    return action_response(request, "switch-detail", pk=pk)
 
 
 @login_required

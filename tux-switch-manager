@@ -253,7 +253,7 @@ show_endpoints() {
     for host in "${hosts[@]}"; do
         url="http://$(url_host "$host"):$PORT"
         echo "  Web UI:     $url/"
-        echo "  Admin:      $url/admin/"
+        echo "  Users:      $url/users/"
     done
     if [[ "${DJANGO_DEBUG:-0}" != "1" ]]; then
         echo "  Note: DJANGO_DEBUG is off, so plain HTTP requests are redirected to HTTPS;"

@@ -5,7 +5,7 @@
 </details>
 {% if operator and supports_cli %}
 <details class="panel" id="configuration-advanced" data-live-key="advanced-controls"><summary>Advanced · manual configuration</summary>
-  <p class="muted">For settings not supported by the graphical editor. Prefer the current-configuration editor above. Manual commands are staged against the latest synchronized baseline.</p>
+  <p class="muted">For settings not supported by the graphical editor. Prefer Current configuration above. Saving manual commands creates a staged change using the latest synchronized configuration revision; it does not change the switch.</p>
   <form method="post" action="{% url 'switch-stage' switch.pk %}">{% csrf_token %}{% include 'switches/form_fields.html' with form=change_form %}<div class="form-actions"><button>Stage commands</button></div></form>
 </details>
 {% endif %}

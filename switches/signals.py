@@ -4,7 +4,7 @@ from django.db import transaction
 from django.db.models.signals import m2m_changed, post_delete, post_save
 from django.dispatch import receiver
 
-from .models import ConfigChange, ConfigRevision, Credential, DiscoveryRun, Job, Switch, SwitchAccess
+from .models import ConfigChange, ConfigRevision, Credential, DiscoveryRun, ExternalChange, Job, Switch, SwitchAccess
 from .services import notify_live
 
 
@@ -14,6 +14,7 @@ def live_model_changed(sender, **kwargs):
     topics = {
         Switch: "switch", SwitchAccess: "access", Job: "job",
         ConfigChange: "switch", ConfigRevision: "switch",
+        ExternalChange: "switch",
         Credential: "credentials", DiscoveryRun: "discovery",
         get_user_model(): "access", Group: "access",
     }

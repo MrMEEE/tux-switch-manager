@@ -118,6 +118,10 @@ class LiveConsumer(AsyncJsonWebsocketConsumer):
             "revision": {"switch", "job", "access"},
             "inventory-form": {"switch", "credentials", "access"},
             "credential-form": {"credentials", "access"},
+            "users": {"access"},
+            "access": {"access", "switch"},
+            "access-form": {"access", "switch"},
+            "user-form": {"access"},
         }
         if event.get("resource") in resources.get(self.topic, set()):
             await self.send_snapshot()

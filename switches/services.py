@@ -19,6 +19,7 @@ ACTION_ROLES = {
     "preview": "operator", "apply": "operator", "restore": "operator",
     "https_enable": "admin", "https_use": "admin",
     "verify": "operator",
+    "reverse_external": "operator",
 }
 PUBLIC_MONITOR_SECTIONS = frozenset({
     "system", "uptime", "chassis", "chassis_env", "chassis_fpc", "health",
@@ -71,6 +72,9 @@ def publish_job(job_id):
                 pk__in=queued.payload.get("change_ids", [queued.payload.get("change_id")]), switch_id=queued.switch_id,
                 status=f"{queued.action}ing",
             ).update(status="pending")
+        if queued.action == "reverse_external":
+            from .models import ExternalChange
+            ExternalChange.objects.filter(pk=queued.payload.get("external_id"), status="reversing").update(status="pending")
         notify_switch(queued.switch_id)
 
 
@@ -89,7 +93,7 @@ def queue_job(switch, action, payload, user):
         from .drivers.base import DriverError
         try:
             registered = driver_class(switch.driver)
-            capability = {"sync": "snapshot", "verify": "snapshot", "ping": "diagnostic", "traceroute": "diagnostic",
+            capability = {"sync": "snapshot", "verify": "snapshot", "reverse_external": "apply", "ping": "diagnostic", "traceroute": "diagnostic",
                           "reboot": "diagnostic", "command": "run_command"}.get(action, action)
             if capability not in registered.capabilities:
                 raise DriverError("This driver does not support that operation.")
@@ -99,6 +103,8 @@ def queue_job(switch, action, payload, user):
                 raise DriverError("This profile has no combined transaction. Preview and commit one staged item at a time.")
         except DriverError as error:
             raise ValueError(str(error)) from None
+        if action in {"apply", "restore", "https_enable"} and switch.external_change:
+            raise ValueError("Review and accept or reverse external configuration changes before writing configuration.")
         job = Job.objects.create(switch=switch, action=action, payload=payload, created_by=user)
         transaction.on_commit(lambda: publish_job(job.pk))
         transaction.on_commit(lambda: notify_switch(switch.pk))
@@ -121,13 +127,13 @@ def queue_pending_changes(switch, action, user):
             if device.changes.filter(status="uncertain").exists():
                 raise ValueError(
                     "There are no pending changes. Uncertain changes cannot be committed again. "
-                    "Synchronize and reconcile actual configuration, then remove the uncertain record "
+                    "Use Verify outcome to check the switch's current settings, then remove the uncertain record "
                     "and stage only any missing settings."
                 )
             raise ValueError("There are no pending changes.")
         latest = device.revisions.first()
         if not latest or any(change.base_revision_id != latest.pk for change in changes):
-            raise ValueError("Staged changes have different or outdated baselines. Synchronize and restage them before combining.")
+            raise ValueError("Some pending changes use older configuration revisions. In Review and Commit, note their intended settings and discard those pending changes. Use Current configuration to save new staged changes containing only the settings still needed before combining them.")
         from .drivers.validation import config_commands
         from .drivers.base import DriverError
         try:
@@ -218,14 +224,24 @@ def queue_restore(switch, revision, user):
     return queue_job(switch, "restore", {"revision_id": revision.pk, "base_id": baseline.pk}, user)
 
 
-def record_revision(switch, config, source="poll", user=None):
+def record_revision(switch, config, source="poll", user=None, structured_config=""):
     checksum = hashlib.sha256(config.encode()).hexdigest()
-    latest = switch.revisions.first()
-    if latest is not None and latest.checksum == checksum:
-        return latest
-    return ConfigRevision.objects.create(
-        switch=switch, config=config, checksum=checksum, source=source, created_by=user,
-    )
+    with transaction.atomic():
+        device = Switch.objects.select_for_update().get(pk=switch.pk)
+        latest = device.revisions.first()
+        if latest is not None and latest.checksum == checksum:
+            revision = latest
+            if structured_config and not revision.structured_config:
+                revision.structured_config = structured_config
+                revision.save(update_fields=["structured_config"])
+        else:
+            revision = ConfigRevision.objects.create(
+                switch=device, config=config, checksum=checksum, source=source, created_by=user,
+                structured_config=structured_config,
+            )
+        from .drift import observe
+        observe(device, revision, source)
+        return revision
 
 
 def validate_network(value):

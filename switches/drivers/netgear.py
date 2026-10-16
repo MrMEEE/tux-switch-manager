@@ -203,7 +203,7 @@ def planned_state(state, ops):
             target[section].update(op["values"])
         else:
             if key not in target[section]:
-                raise ConfigConflict("The NETGEAR item no longer exists. Synchronize and restage.")
+                raise ConfigConflict("The NETGEAR item no longer exists. Sync now, review the pending change, then discard it and use Current configuration to save a new staged change if still needed.")
             target[section][key].update(op["values"])
     return target
 
@@ -447,7 +447,7 @@ class NetgearGS108Tv2Driver(BaseDriver):
     def apply(self, commands, expected_config):
         ops = operations(commands)
         if self.get_config() != expected_config:
-            raise ConfigConflict("NETGEAR managed configuration changed. Synchronize and restage before committing.")
+            raise ConfigConflict("NETGEAR configuration changed since this pending change was saved. Sync now, review and discard the old pending change, then use Current configuration to save a new staged change containing only the settings still needed.")
         target = self._planned(ops)
         attempted = False
         try:
@@ -484,7 +484,7 @@ class NetgearGS108Tv2Driver(BaseDriver):
             if attempted:
                 raise PartialApply(
                     "NETGEAR write outcome is uncertain or partially applied. No rollback or automatic retry was attempted. "
-                    "Synchronize, inspect the switch GUI and restage from the actual configuration."
+                    "Use Verify outcome or sync and inspect the switch GUI before creating any replacement changes. Do not commit this change again."
                 ) from None
             if isinstance(error, DriverError):
                 raise

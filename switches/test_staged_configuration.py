@@ -96,6 +96,43 @@ class StagedConfigurationTests(TestCase):
         self.assertEqual(current_state(self.switch)[1]["ports"][0]["description"], "User access")
         self.assertFalse(self.switch.jobs.exists())
 
+    def test_port_link_status_is_observed_and_updates_in_http_and_live_views(self):
+        self.stage("set interfaces ge-0/0/4 disable")
+        request = RequestFactory().get("/")
+        request.user = self.user
+        for link in ("up", "down"):
+            self.switch.snapshot["interfaces"] = f"ge-0/0/4 up {link}\n"
+            self.switch.save()
+            for html in (self.client.get(reverse("switch-detail", args=[self.switch.pk])).content.decode(),
+                         snapshot(request, "switch", self.switch.pk)["html"]):
+                port = html.split('<td class="mono">ge-0/0/4')[1].split("</tr>")[0]
+                self.assertIn(f">{link.capitalize()}</span>", port)
+                self.assertIn("<td>down</td>", port)
+                self.assertIn("<th>Link status</th>", html)
+                missing = html.split('<td class="mono">ge-0/0/0')[1].split("</tr>")[0]
+                self.assertIn(">Unknown</span>", missing)
+        self.assertFalse(self.switch.jobs.exists())
+
+    def test_managed_port_tables_show_link_status_in_http_and_live_views(self):
+        request = RequestFactory().get("/")
+        request.user = self.user
+        for slug, config, key, telemetry in [
+            ("netgear_gs108tv2", json.dumps(netgear_state()), "g1", [{"name": "g1", "link": "Link Up"}]),
+            ("netgear_plus", json.dumps(plus_state()), "1", [{"name": "1", "link": "Up"}]),
+            ("hp_comware", CONFIG, "GigabitEthernet1/0/1", "GE1/0/1 UP 1G F A 10\n"),
+        ]:
+            with self.subTest(slug=slug):
+                self.switch.driver = slug
+                self.switch.snapshot = {"interfaces": telemetry}
+                self.switch.save()
+                record_revision(self.switch, config)
+                for html in (self.client.get(reverse("switch-detail", args=[self.switch.pk])).content.decode(),
+                             snapshot(request, "switch", self.switch.pk)["html"]):
+                    self.assertIn("<th>Link status</th>", html)
+                    port = html.split(f'<td class="mono">{key}</td>')[1].split("</tr>")[0]
+                    self.assertIn(">Up</span>", port)
+                    self.assertIn("badge-ok", port)
+
     def test_new_items_and_deletions_remain_visible_and_discard_reverts(self):
         change = self.stage("set vlans guest vlan-id 30\ndelete vlans voice")
         self.assertEqual(self.row("vlans", "guest")["vlan_id"], "30")
@@ -123,10 +160,37 @@ class StagedConfigurationTests(TestCase):
         rows, warnings = self.planned()
         self.assertEqual(rows["system"][0]["hostname"], "edge")
         self.assertEqual(len(warnings), 3)
-        self.assertIn("older baseline", warnings[0])
-        self.assertIn("uncertain", warnings[1])
-        self.assertIn("cannot be represented", warnings[2])
+        self.assertIn("saved before the latest configuration was synchronized", warnings[0])
+        self.assertIn("latest synchronized settings instead", warnings[0])
+        self.assertIn("Verify outcome", warnings[1])
+        self.assertIn("cannot be shown reliably", warnings[2])
         self.assertFalse(rows["system"][0].get("staged"))
+
+    def test_outdated_change_has_plain_language_recovery_in_http_and_live(self):
+        change = self.stage("set system host-name keep-this-setting")
+        revision = record_revision(self.switch, "new synchronized configuration")
+        self.switch.snapshot["config"] = revision.config
+        self.switch.save()
+        request = RequestFactory().get("/")
+        request.user = self.user
+        for html in [
+            self.client.get(reverse("switch-detail", args=[self.switch.pk])).content.decode(),
+            snapshot(request, "switch", self.switch.pk)["html"],
+        ]:
+            self.assertIn("Staged means saved here but not yet applied to the switch", html)
+            self.assertIn("latest synchronized settings instead", html)
+            self.assertIn("Saved using configuration revision", html)
+            self.assertIn("note the settings you want to keep", html)
+            self.assertIn("without changing the switch", html)
+            self.assertIn("save a new staged change", html)
+            self.assertIn("Review the new change before committing it", html)
+            self.assertNotIn("restage", html.lower())
+            self.assertNotIn("not projected", html)
+            self.assertNotIn("outdated baseline", html)
+        change.refresh_from_db()
+        self.assertEqual(change.status, "pending")
+        self.assertEqual(change.base_revision_id, self.revision.pk)
+        self.assertFalse(self.switch.jobs.exists())
 
     def test_cross_item_effects_vlan_rename_membership_and_lag_attachment(self):
         self.stage("set vlans staff vlan-id 10\ndelete vlans users\n"
@@ -190,6 +254,27 @@ class StagedConfigurationTests(TestCase):
         self.assertEqual(response.status_code, 302)
         return response.url
 
+    def test_editor_save_returns_to_the_edited_section(self):
+        for section, item, data in [
+            ("system", "system", {"hostname": "new-host"}),
+            ("ports", "ge-0/0/0", {**current_state(self.switch)[1]["ports"][0], "description": "Updated port"}),
+            ("vlans", None, {"operation": "save", "name": "guest", "vlan_id": 30, "member_mode": "access"}),
+            ("routing", "0.0.0.0/0", {"operation": "delete", "prefix": "0.0.0.0/0",
+                                      "next_hop": "192.0.2.254", "confirm_delete": "on"}),
+        ]:
+            with self.subTest(section=section, item=item):
+                url = reverse("configuration-editor", args=[self.switch.pk, section])
+                if item:
+                    url += f"?item={item}"
+                target = f"{reverse('switch-detail', args=[self.switch.pk])}#configure-{section}"
+                editor = self.client.get(url)
+                self.assertContains(editor, f'href="{target}"', count=2)
+                response = self.client.post(url, {**data, "revision": self.revision.pk})
+                self.assertEqual(response.status_code, 302, response.context["form"].errors if response.context else "")
+                self.assertRedirects(response, target)
+                self.assertFalse(self.switch.jobs.exists())
+                self.switch.changes.all().delete()
+
     def test_existing_item_prefills_and_updates_same_change_then_reverts(self):
         row = current_state(self.switch)[1]["ports"][0]
         form = EditorForm("ports", current_state(self.switch)[1], row, {
@@ -205,7 +290,7 @@ class StagedConfigurationTests(TestCase):
         response = self.client.post(url, {
             **row, "revision": self.revision.pk, "description": "Revised staged description", "staged_token": token,
         })
-        self.assertEqual(response.status_code, 302)
+        self.assertRedirects(response, f"{reverse('switch-detail', args=[self.switch.pk])}#configure-ports")
         change.refresh_from_db()
         self.assertEqual(self.switch.changes.count(), 1)
         self.assertIn("Revised staged description", change.commands)
@@ -215,6 +300,166 @@ class StagedConfigurationTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self.row("ports", "ge-0/0/0")["description"], "User access")
         self.assertFalse(self.switch.jobs.exists())
+
+    def test_regular_item_editor_reopens_pending_values_and_keeps_one_combined_change(self):
+        row = current_state(self.switch)[1]["ports"][0]
+        url = reverse("configuration-editor", args=[self.switch.pk, "ports"]) + f"?item={row['key']}"
+        data = {**row, "revision": self.revision.pk, "description": "First pending description"}
+        self.assertEqual(self.client.post(url, data).status_code, 302)
+        change = self.switch.changes.get()
+        response = self.client.get(url)
+        self.assertEqual(response.context["editing_change"].pk, change.pk)
+        self.assertEqual(response.context["form"].initial["description"], "First pending description")
+        token = response.context["form"].initial["staged_token"]
+        response = self.client.post(url, {**data, "admin_state": "down", "staged_token": token})
+        self.assertEqual(response.status_code, 302)
+        change.refresh_from_db()
+        self.assertEqual(self.switch.changes.count(), 1)
+        self.assertIn('description "First pending description"', change.commands)
+        self.assertIn(f"set interfaces {row['key']} disable", change.commands)
+        self.assertEqual(self.row("ports", row["key"])["description"], "First pending description")
+        self.assertEqual(self.row("ports", row["key"])["admin_state"], "down")
+        response = self.client.get(url)
+        token = response.context["form"].initial["staged_token"]
+        response = self.client.post(url, {**data, "admin_state": "down", "description": row["description"], "staged_token": token})
+        self.assertEqual(response.status_code, 302)
+        change.refresh_from_db()
+        self.assertNotIn("description", change.commands)
+        self.assertIn(f"set interfaces {row['key']} disable", change.commands)
+        self.assertEqual(self.switch.changes.count(), 1)
+        self.assertFalse(self.switch.jobs.exists())
+
+    def test_editor_opened_before_another_save_cannot_create_a_second_change(self):
+        row = current_state(self.switch)[1]["ports"][0]
+        url = reverse("configuration-editor", args=[self.switch.pk, "ports"]) + f"?item={row['key']}"
+        self.client.get(url)
+        data = {**row, "revision": self.revision.pk, "description": "First pending description"}
+        self.assertEqual(self.client.post(url, data).status_code, 302)
+        response = self.client.post(url, {**data, "description": "Stale second tab"})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "already has a staged change")
+        self.assertEqual(self.switch.changes.count(), 1)
+        self.assertNotIn("Stale second tab", self.switch.changes.get().commands)
+
+    def test_direct_staging_cannot_bypass_same_item_duplicate_guard(self):
+        row = current_state(self.switch)[1]["ports"][0]
+        state = current_state(self.switch)[1]
+        for description in ("First pending description", "Second pending description"):
+            form = EditorForm("ports", state, row, {**row, "revision": self.revision.pk,
+                              "description": description}, self.revision.pk)
+            self.assertTrue(form.is_valid(), form.errors)
+            if self.switch.changes.exists():
+                with self.assertRaisesMessage(DriverError, "already has a staged change"):
+                    stage_editor(self.switch, form, self.user)
+            else:
+                stage_editor(self.switch, form, self.user)
+        self.assertEqual(self.switch.changes.count(), 1)
+
+    def test_regular_editor_reopens_staged_addition_and_renamed_object(self):
+        url = reverse("configuration-editor", args=[self.switch.pk, "vlans"])
+        self.assertEqual(self.client.post(url, {"revision": self.revision.pk, "operation": "save",
+                                              "name": "guest", "vlan_id": 30, "member_mode": "access"}).status_code, 302)
+        change = self.switch.changes.get()
+        response = self.client.get(url + "?item=guest")
+        self.assertEqual(response.context["editing_change"].pk, change.pk)
+        self.assertContains(response, 'value="guest"')
+        self.assertContains(response, 'value="30"')
+        self.assertIsNone(response.context["item"])
+        self.client.post(reverse("change-action", args=[self.switch.pk, change.pk]), {"action": "discard"})
+        self.assertEqual(self.client.post(url + "?item=users", {
+            "revision": self.revision.pk, "operation": "save", "name": "users", "new_name": "staff",
+            "vlan_id": 10, "member_interfaces": ["ge-0/0/0"], "member_mode": "access",
+        }).status_code, 302)
+        rename = self.switch.changes.filter(status="pending").get()
+        for item in ("users", "staff"):
+            response = self.client.get(url + f"?item={item}")
+            self.assertEqual(response.context["editing_change"].pk, rename.pk)
+            self.assertEqual(response.context["item"]["key"], "users")
+            self.assertContains(response, 'name="new_name" value="staff"')
+
+    def test_regular_managed_port_editor_keeps_description_when_admin_state_changes(self):
+        for slug, config, key, disabled in [
+            ("netgear_gs108tv2", json.dumps(netgear_state()), "g1", "Disable"),
+            ("netgear_plus", json.dumps(plus_state()), "1", None),
+            ("hp_comware", CONFIG, "GigabitEthernet1/0/1", "down"),
+        ]:
+            with self.subTest(slug=slug):
+                self.switch.driver = slug
+                self.switch.save()
+                self.revision = record_revision(self.switch, config)
+                from .configuration import current_state
+                row = next(row for row in current_state(self.switch)[1]["ports"] if row["key"] == key)
+                url = reverse("configuration-editor", args=[self.switch.pk, "ports"]) + f"?item={key}"
+                data = {**row, "revision": self.revision.pk, "description": "Pending description", "acknowledge": True}
+                self.assertEqual(self.client.post(url, data).status_code, 302)
+                change = self.switch.changes.get()
+                response = self.client.get(url)
+                self.assertEqual(response.context["editing_change"].pk, change.pk)
+                self.assertEqual(response.context["form"].initial["description"], "Pending description")
+                self.assertFalse(response.context["form"].initial["acknowledge"])
+                token = response.context["form"].initial["staged_token"]
+                second = {"admin_state": disabled} if disabled else {"flow_control": "4"}
+                response = self.client.post(url, {**data, **second, "staged_token": token})
+                self.assertRedirects(response, f"{reverse('switch-detail', args=[self.switch.pk])}#configure-ports")
+                change.refresh_from_db()
+                self.assertEqual(self.switch.changes.count(), 1)
+                self.assertEqual(json.loads(change.commands)["values"]["description"], "Pending description")
+                for field, value in second.items():
+                    self.assertEqual(json.loads(change.commands)["values"][field], value)
+                self.assertFalse(self.switch.jobs.exists())
+                self.switch.changes.all().delete()
+
+    def test_duplicate_addition_and_existing_duplicates_are_not_silently_overwritten(self):
+        url = reverse("configuration-editor", args=[self.switch.pk, "vlans"])
+        data = {"revision": self.revision.pk, "operation": "save", "name": "guest", "vlan_id": 30,
+                "member_mode": "access"}
+        self.assertEqual(self.client.post(url, data).status_code, 302)
+        response = self.client.post(url, {**data, "vlan_id": 31})
+        self.assertContains(response, "already has a staged change")
+        change = self.switch.changes.get()
+        ConfigChange.objects.create(switch=self.switch, base_revision=change.base_revision, commands=change.commands,
+                                    editor_data=change.editor_data, created_by=self.user)
+        response = self.client.get(url + "?item=guest", follow=True)
+        self.assertContains(response, "already has several staged changes")
+        self.assertEqual(self.switch.changes.count(), 2)
+        self.assertFalse(self.switch.jobs.exists())
+
+    def test_other_objects_remain_separate_and_unsafe_change_status_blocks_normal_editor(self):
+        row = current_state(self.switch)[1]["ports"][0]
+        url = reverse("configuration-editor", args=[self.switch.pk, "ports"]) + f"?item={row['key']}"
+        data = {**row, "revision": self.revision.pk, "description": "Pending description"}
+        self.assertEqual(self.client.post(url, data).status_code, 302)
+        change = self.switch.changes.get()
+        self.assertEqual(self.client.post(reverse("configuration-editor", args=[self.switch.pk, "system"]),
+                                         {"revision": self.revision.pk, "hostname": "another-object"}).status_code, 302)
+        self.assertEqual(self.switch.changes.count(), 2)
+        for status in ("previewing", "applying", "uncertain"):
+            ConfigChange.objects.filter(pk=change.pk).update(status=status)
+            response = self.client.get(url, follow=True)
+            self.assertContains(response, "Only pending staged changes can be edited")
+            self.assertEqual(self.switch.changes.count(), 2)
+        ConfigChange.objects.filter(pk=change.pk).update(status="pending")
+        revision = record_revision(self.switch, "new configuration")
+        self.switch.snapshot["config"] = revision.config
+        self.switch.save()
+        response = self.client.get(url, follow=True)
+        self.assertContains(response, "older configuration revision")
+        change.refresh_from_db()
+        self.assertEqual(change.base_revision_id, self.revision.pk)
+
+    def test_new_pending_change_marks_an_already_open_object_editor_stale_live(self):
+        row = current_state(self.switch)[1]["ports"][0]
+        request = RequestFactory().get("/", {"revision": str(self.revision.pk), "profile": self.switch.driver,
+                                             "section": "ports", "item": row["key"]})
+        request.user = self.user
+        self.assertFalse(snapshot(request, "editor-state", self.switch.pk)["metadata"]["editor_stale"])
+        url = reverse("configuration-editor", args=[self.switch.pk, "ports"]) + f"?item={row['key']}"
+        self.assertEqual(self.client.post(url, {**row, "revision": self.revision.pk,
+                                              "description": "Created in another tab"}).status_code, 302)
+        self.assertTrue(snapshot(request, "editor-state", self.switch.pk)["metadata"]["editor_stale"])
+        request.GET = request.GET.copy()
+        request.GET["item"] = "ge-0/0/1"
+        self.assertFalse(snapshot(request, "editor-state", self.switch.pk)["metadata"]["editor_stale"])
 
     def test_staged_addition_can_be_edited_then_removed_without_device_deletion(self):
         response = self.client.post(reverse("configuration-editor", args=[self.switch.pk, "vlans"]), {
@@ -263,7 +508,7 @@ class StagedConfigurationTests(TestCase):
         self.switch.save()
         change = self.stage("set system host-name stale")
         response = self.client.get(reverse("change-edit", args=[self.switch.pk, change.pk]), follow=True)
-        self.assertContains(response, "outdated baseline")
+        self.assertContains(response, "older configuration revision")
         other = Switch.objects.create(name="other", address="192.0.2.2")
         foreign = ConfigChange.objects.create(switch=other, base_revision=old, commands="set system host-name other")
         response = self.client.get(reverse("change-edit", args=[self.switch.pk, foreign.pk]))

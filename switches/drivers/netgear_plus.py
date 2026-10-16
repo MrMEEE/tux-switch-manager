@@ -91,7 +91,7 @@ def validate_target(state, ops):
             target[section].update(values)
         else:
             if key not in target[section]:
-                raise ConfigConflict("The NETGEAR Plus item no longer exists. Synchronize and restage.")
+                raise ConfigConflict("The NETGEAR Plus item no longer exists. Sync now, review the pending change, then discard it and use Current configuration to save a new staged change if still needed.")
             if section == "ports" and target["ports"][key]["lag"] and set(values) & {"speed", "flow_control", "pvid"}:
                 raise DriverError("Edit aggregated-port settings in the native LAG GUI.")
             if section == "ports" and "pvid" in values:
@@ -330,7 +330,7 @@ class NetgearPlusDriver(NetgearGS108Tv2Driver):
     def apply(self, commands, expected_config):
         ops = operations(commands)
         if self.get_config() != expected_config:
-            raise ConfigConflict("NETGEAR Plus managed configuration changed. Synchronize and restage.")
+            raise ConfigConflict("NETGEAR Plus configuration changed since this pending change was saved. Sync now, review and discard the old pending change, then use Current configuration to save a new staged change containing only the settings still needed.")
         target = validate_target(self.state, ops)
         if canonical(target) == expected_config:
             raise DriverError("No NETGEAR Plus fields changed.")
@@ -367,5 +367,5 @@ class NetgearPlusDriver(NetgearGS108Tv2Driver):
                 raise DriverError("NETGEAR Plus readback differs from planned managed state.")
         except Exception as error:
             logger.warning("NETGEAR Plus write/readback failed (%s); outcome requires reconciliation.", type(error).__name__)
-            raise PartialApply("NETGEAR Plus write outcome is uncertain or partially applied. No rollback or retry was attempted. Synchronize and inspect the native GUI before restaging.") from None
+            raise PartialApply("NETGEAR Plus write outcome is uncertain or partially applied. No rollback or retry was attempted. Use Verify outcome or sync and inspect the switch GUI before creating any replacement changes. Do not commit this change again.") from None
         return "NETGEAR Plus managed configuration readback verified.\n" + WARNING

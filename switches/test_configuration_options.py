@@ -129,7 +129,7 @@ class AdditionalConfigurationTests(TestCase):
     def test_combined_changes_refuse_stale_baseline(self):
         ConfigChange.objects.create(switch=self.switch, base_revision=self.revision, commands="set system host-name first")
         record_revision(self.switch, "updated baseline")
-        with self.assertRaisesRegex(ValueError, "outdated baselines"):
+        with self.assertRaisesRegex(ValueError, "older configuration revisions"):
             queue_pending_changes(self.switch, "apply", self.user)
         self.assertFalse(Job.objects.exists())
 

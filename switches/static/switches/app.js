@@ -37,7 +37,7 @@
   }
   document.addEventListener("submit", async (event) => {
     const form = event.target;
-    if (form.matches("[data-configuration-editor]") && form.dataset.liveStale === "true") {
+    if (form.matches("[data-configuration-editor], [data-account-editor]") && form.dataset.liveStale === "true") {
       event.preventDefault();
       showMessages([{text: "This editor is outdated. Reopen it before saving; your draft has not been submitted.", tags: "error"}]);
       return;
@@ -336,8 +336,12 @@
     function connect() {
       if (revoked) return;
       const parameters = new URLSearchParams({path: location.pathname});
+      if (container.dataset.editorKind) parameters.set("kind", container.dataset.editorKind);
+      if (container.dataset.editorToken) parameters.set("token", container.dataset.editorToken);
       if (container.dataset.editorRevision) parameters.set("revision", container.dataset.editorRevision);
       if (container.dataset.editorProfile) parameters.set("profile", container.dataset.editorProfile);
+      if (container.dataset.editorSection) parameters.set("section", container.dataset.editorSection);
+      if (container.dataset.editorItem) parameters.set("item", container.dataset.editorItem);
       if (container.dataset.editorChange) {
         parameters.set("change", container.dataset.editorChange);
         parameters.set("token", container.dataset.editorToken || "");
@@ -354,7 +358,7 @@
           if (event.event === "snapshot" && event.metadata) {
             if (typeof event.metadata.title === "string") document.title = event.metadata.title;
             if (typeof event.metadata.editor_stale === "boolean") {
-              const form = document.querySelector("[data-configuration-editor]");
+              const form = document.querySelector("[data-configuration-editor], [data-account-editor]");
               if (form) {
                 form.dataset.liveStale = String(event.metadata.editor_stale);
                 form.querySelectorAll('button[type="submit"], button:not([type])').forEach((button) => {
@@ -382,8 +386,11 @@
           if (container.dataset.liveUrl.includes("/inventory-form/") || container.dataset.liveUrl.includes("/credential-form/")) {
             container.closest("form")?.replaceChildren();
           }
+          if (container.dataset.liveUrl.includes("/user-form/") || container.dataset.liveUrl === "/ws/live/access-form/") {
+            container.closest("form")?.replaceChildren();
+          }
           if (container.dataset.liveUrl === "/ws/live/account/") document.getElementById("main-content")?.replaceChildren();
-          if (["/ws/live/discovery/", "/ws/live/credentials/"].includes(container.dataset.liveUrl)) {
+          if (["/ws/live/discovery/", "/ws/live/credentials/", "/ws/live/users/", "/ws/live/access/"].includes(container.dataset.liveUrl)) {
             document.getElementById("main-content")?.replaceChildren();
           }
           document.querySelectorAll("[data-live-text]").forEach((element) => element.replaceChildren());

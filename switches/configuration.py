@@ -339,7 +339,8 @@ class EditorForm(forms.Form):
             fields["vlans"] = forms.MultipleChoiceField(label="VLAN membership", choices=vlans, required=False, widget=forms.CheckboxSelectMultiple)
             if section == "lags":
                 lag_name = row["name"] if row else ""
-                allowed = [(port["name"], port["name"]) for port in state["ports"]
+                allowed = [(port["name"], f"{port['name']} - {port['description']}" if port["description"] else port["name"])
+                           for port in state["ports"]
                            if not port["lag"] or port["lag"] == lag_name]
                 fields["members"] = forms.MultipleChoiceField(label="Member ports", choices=allowed, widget=forms.CheckboxSelectMultiple, required=False)
                 fields["lacp"] = forms.ChoiceField(label="LACP mode", choices=[("", "Disabled"), ("active", "Active"), ("passive", "Passive")], required=False)

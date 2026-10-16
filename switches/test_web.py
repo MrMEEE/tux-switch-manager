@@ -569,11 +569,11 @@ class WebTests(TestCase):
         DiscoveryRun.objects.create(network="192.0.2.0/28", driver="juniper_ex", username="user", credential_env="SWITCH_CREDENTIAL_TEST", created_by=self.outsider, results=["private-result"])
         self.assertNotContains(self.client.get(reverse("discovery")), "private-result")
 
-    def test_access_admin_requires_manage_access_not_model_permissions(self):
+    def test_access_management_requires_manage_access_not_model_permissions(self):
         self.viewer.is_staff = True
         self.viewer.save()
         self.viewer.user_permissions.add(Permission.objects.get(codename="change_switchaccess"))
-        path = reverse("admin:switches_switchaccess_changelist")
+        path = reverse("access-management")
         self.assertEqual(self.client.get(path).status_code, 403)
         self.viewer.user_permissions.add(Permission.objects.get(codename="manage_access"))
         self.assertEqual(self.client.get(path).status_code, 200)
